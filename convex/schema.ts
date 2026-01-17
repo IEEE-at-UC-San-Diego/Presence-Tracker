@@ -27,4 +27,22 @@ export default defineSchema({
   })
     .index("by_deviceId", ["deviceId"])
     .index("by_timestamp", ["timestamp"]),
+
+  integrations: defineTable({
+    type: v.union(v.literal("discord"), v.literal("slack")),
+    config: v.object({
+      webhookUrl: v.optional(v.string()),
+      botToken: v.optional(v.string()),
+      channelId: v.optional(v.string()),
+    }),
+    isEnabled: v.boolean(),
+    // Keep track of the last successfully sent message ID to allow threading or replacement
+    lastMessageId: v.optional(v.string()),
+  }),
+
+  activeMessages: defineTable({
+    integrationId: v.id("integrations"),
+    messageId: v.string(), // External ID
+    channelId: v.optional(v.string()),
+  }).index("by_integrationId", ["integrationId"]),
 });

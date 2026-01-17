@@ -1,6 +1,7 @@
 import { v } from "convex/values";
 import { mutation, query } from "./_generated/server";
 import { Doc } from "./_generated/dataModel";
+import { internal } from "./_generated/api";
 
 const GRACE_PERIOD_SECONDS = 300;
 
@@ -151,6 +152,10 @@ export const updateDeviceStatus = mutation({
       connectedSince: connectedSince,
     });
 
+    if (!existingDevice.pendingRegistration) {
+      await ctx.scheduler.runAfter(0, internal.notifications.updatePresenceNotifications, {});
+    }
+
     return {
       ...existingDevice,
       status: args.status,
@@ -282,6 +287,8 @@ export const completeDeviceRegistration = mutation({
       connectedSince: now,
     });
 
+    await ctx.scheduler.runAfter(0, internal.notifications.updatePresenceNotifications, {});
+
     // Log creation
     await ctx.db.insert("deviceLogs", {
       deviceId: existingDevice._id,
@@ -362,5 +369,22 @@ export const cleanupExpiredGracePeriods = mutation({
     }
 
     return { deletedCount: expiredDevices.length, deletedMacs };
+  },
+});
+
+export const getPresentUsers = query({
+  args: {},
+  handler: async (ctx) => {
+    const devices = await ctx.db
+      .query("devices")
+      .withIndex("by_status", (q) => q.eq("status", "present"))
+      .collect();
+
+    return devices
+      .filter((d) => !d.pendingRegistration)
+      .map((d) => ({
+        firstName: d.firstName,
+        lastName: d.lastName,
+      }));
   },
 });

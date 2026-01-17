@@ -1,7 +1,8 @@
 // Initialize Convex Client
-const convexClient = new convex.ConvexClient(window.CONVEX_URL, {
+window.convexClient = new convex.ConvexClient(window.CONVEX_URL, {
     skipConvexDeploymentUrlCheck: true
 });
+const convexClient = window.convexClient;
 
 // State
 let selectedMacForRegistration = null;

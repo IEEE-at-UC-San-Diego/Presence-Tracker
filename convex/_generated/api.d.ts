@@ -10,6 +10,8 @@
 
 import type * as devices from "../devices.js";
 import type * as fixPendingDevices from "../fixPendingDevices.js";
+import type * as integrations from "../integrations.js";
+import type * as notifications from "../notifications.js";
 
 import type {
   ApiFromModules,
@@ -20,6 +22,8 @@ import type {
 declare const fullApi: ApiFromModules<{
   devices: typeof devices;
   fixPendingDevices: typeof fixPendingDevices;
+  integrations: typeof integrations;
+  notifications: typeof notifications;
 }>;
 
 /**

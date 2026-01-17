@@ -515,3 +515,69 @@ body {
 .toast.error {
     border-left: 3px solid var(--danger);
 }
+
+/* Integrations */
+.integration-card {
+    border: 1px solid var(--border);
+    border-radius: var(--radius);
+    padding: 1rem;
+    margin-bottom: 1rem;
+    background: #F8FAFC;
+}
+
+.integration-card h4 {
+    margin-bottom: 0.75rem;
+    font-size: 0.9rem;
+    text-transform: uppercase;
+    color: var(--text-secondary);
+}
+
+.form-actions {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    margin-top: 1rem;
+}
+
+/* Toggle Switch */
+.switch {
+    display: flex;
+    align-items: center;
+    gap: 0.5rem;
+    cursor: pointer;
+    font-size: 0.85rem;
+    color: var(--text-secondary);
+}
+
+.switch input {
+    display: none;
+}
+
+.slider {
+    position: relative;
+    width: 36px;
+    height: 20px;
+    background-color: var(--border);
+    border-radius: 20px;
+    transition: .2s;
+}
+
+.slider:before {
+    content: "";
+    position: absolute;
+    height: 16px;
+    width: 16px;
+    left: 2px;
+    bottom: 2px;
+    background-color: white;
+    border-radius: 50%;
+    transition: .2s;
+}
+
+.switch input:checked+.slider {
+    background-color: var(--success);
+}
+
+.switch input:checked+.slider:before {
+    transform: translateX(16px);
+}
