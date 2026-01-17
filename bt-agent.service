@@ -1,0 +1,17 @@
+[Unit]
+Description=Bluetooth Pairing Agent
+Documentation=man:bt-agent(1)
+After=bluetooth.service
+Requires=bluetooth.service
+
+[Service]
+Type=simple
+ExecStart=/usr/bin/bt-agent -c NoInputNoOutput
+Restart=on-failure
+RestartSec=5
+
+# Don't restart if manually stopped
+# on-failure means: restart on non-zero exit, killed by signal (except SIGHUP, SIGINT, SIGTERM, SIGPIPE)
+
+[Install]
+WantedBy=multi-user.target
