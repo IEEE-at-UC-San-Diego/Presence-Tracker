@@ -1,6 +1,7 @@
 import os
 import time
 import logging
+from logging.handlers import RotatingFileHandler
 from datetime import datetime
 from typing import Any
 import convex
@@ -15,7 +16,8 @@ logging.basicConfig(
     level=logging.INFO,
     format="%(asctime)s - %(levelname)s - %(message)s",
     handlers=[
-        logging.FileHandler("presence_tracker.log"),
+        # Rotate log after ~100KB (approx 500 lines), keep 1 backup
+        RotatingFileHandler("presence_tracker.log", maxBytes=100000, backupCount=1),
         logging.StreamHandler(),
     ],
 )
@@ -329,32 +331,14 @@ def check_and_update_devices() -> None:
                             f"Failed to auto-connect to {display_name} ({mac_address}) - "
                             f"Attempt {failed_count}/{FAILED_CONNECTION_THRESHOLD}"
                         )
-                        # Check if threshold exceeded
+                        # Check if threshold exceeded - just log, don't delete
                         if failed_count >= FAILED_CONNECTION_THRESHOLD:
-                            device_id = device.get("_id")
                             logger.warning(
                                 f"Threshold exceeded for {display_name} ({mac_address}) - "
-                                f"removing device"
+                                f"device remains in database (deletion disabled)"
                             )
-                            # Remove from Bluetooth
-                            bluetooth_scanner.remove_device(mac_address)
-                            # Remove from Convex database
-                            if device_id:
-                                try:
-                                    convex_client.mutation(
-                                        "devices:deleteDevice", {"id": device_id}
-                                    )
-                                    logger.info(
-                                        f"Deleted device {display_name} ({mac_address}) "
-                                        f"from Convex database"
-                                    )
-                                except Exception as e:
-                                    logger.error(
-                                        f"Error deleting device {display_name} from Convex: {e}"
-                                    )
-                            # Remove from tracking
+                            # Reset counter to avoid spamming the log
                             failed_connection_attempts.pop(mac_address, None)
-                            continue
 
             # Device is not connected and couldn't auto-connect - mark as absent
             new_status = "absent"

@@ -120,10 +120,8 @@ export const updateDeviceStatus = mutation({
 
     const now = Date.now();
 
-    if (args.status === "absent" && existingDevice.pendingRegistration) {
-      await ctx.db.delete(existingDevice._id);
-      return { ...existingDevice, status: "absent", lastSeen: now };
-    }
+    // Note: We no longer delete pending devices when they go absent
+    // They will remain in the database for manual review
 
     // Logic for connectedSince
     let connectedSince = existingDevice.connectedSince;
@@ -341,34 +339,18 @@ export const deleteDevice = mutation({
     id: v.id("devices"),
   },
   handler: async (ctx, args) => {
-    await ctx.db.delete(args.id);
-    return { success: true };
+    // Deletion disabled - devices should never be deleted
+    console.log(`[deleteDevice] Deletion attempted for ${args.id} but deletion is disabled`);
+    return { success: false, message: "Device deletion is disabled" };
   },
 });
 
 export const cleanupExpiredGracePeriods = mutation({
   args: {},
   handler: async (ctx) => {
-    const now = Date.now();
-    const devices = await ctx.db.query("devices").collect();
-
-    // Delete pending devices whose grace period has expired
-    // No status check needed - if they weren't registered during grace period, remove them
-    const expiredDevices = devices.filter(
-      (device) =>
-        device.pendingRegistration &&
-        device.gracePeriodEnd &&
-        now > device.gracePeriodEnd,
-    );
-
-    const deletedMacs: string[] = [];
-    for (const device of expiredDevices) {
-      console.log(`[Cleanup] Deleting expired pending device: ${device.macAddress} (grace period ended at ${new Date(device.gracePeriodEnd!).toISOString()})`);
-      deletedMacs.push(device.macAddress);
-      await ctx.db.delete(device._id);
-    }
-
-    return { deletedCount: expiredDevices.length, deletedMacs };
+    // Cleanup disabled - devices should never be automatically deleted
+    // Pending devices will remain for manual review/registration
+    return { deletedCount: 0, deletedMacs: [] };
   },
 });
 
@@ -385,6 +367,7 @@ export const getPresentUsers = query({
       .map((d) => ({
         firstName: d.firstName,
         lastName: d.lastName,
+        name: d.name,
       }));
   },
 });

@@ -8,16 +8,10 @@ export const updatePresenceNotifications = action({
         // 1. Get present users
         const users = await ctx.runQuery(api.devices.getPresentUsers);
 
-        // 2. Format message
-        let message = "Currently in Project Space: ";
-        if (users.length === 0) {
-            message = "Project Space is currently empty.";
-        } else {
-            const names = users.map((u: any) =>
-                (u.firstName && u.lastName) ? `${u.firstName} ${u.lastName}` : (u.name || "Unknown")
-            ).join(", ");
-            message += names;
-        }
+        // 2. Prepare user list
+        const userList = users.map((u: any) =>
+            (u.firstName && u.lastName) ? `${u.firstName} ${u.lastName}` : (u.name || "Unknown")
+        );
 
         // 3. Get integrations
         const integrations = await ctx.runQuery(api.integrations.getIntegrations);
@@ -25,6 +19,17 @@ export const updatePresenceNotifications = action({
         // 4. Process integrations
         for (const integration of integrations) {
             if (!integration.isEnabled) continue;
+
+            let message = "";
+            if (userList.length === 0) {
+                message = "Project Space is currently empty.";
+            } else {
+                const header = integration.type === "discord"
+                    ? "**Currently in Project Space:**"
+                    : "Currently in Project Space:";
+
+                message = `${header}\n` + userList.map(n => `• ${n}`).join("\n");
+            }
 
             try {
                 if (integration.type === "discord" && integration.config.webhookUrl) {
