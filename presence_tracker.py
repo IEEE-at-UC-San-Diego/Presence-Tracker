@@ -47,6 +47,9 @@ recently_connected: set[str] = set()
 # Track consecutive failed connection attempts per device
 failed_connection_attempts: dict[str, int] = {}
 
+# Track previous status of each device for deduplication
+device_previous_status: dict[str, str] = {}
+
 # Threshold for consecutive failed connections before auto-removal
 FAILED_CONNECTION_THRESHOLD = 3
 
@@ -196,9 +199,39 @@ def scan_all_connected_devices() -> list[str]:
     return bluetooth_scanner.get_all_connected_devices()
 
 
+def log_attendance(mac_address: str, name: str, status: str) -> bool:
+    """
+    Log attendance change to Convex using the logAttendance function.
+
+    Args:
+        mac_address: The MAC address of the device
+        name: The display name of the device/user
+        status: Either "present" or "absent"
+
+    Returns:
+        True if log was successful, False otherwise
+    """
+    try:
+        result = convex_client.mutation(
+            "devices:logAttendance",
+            {
+                "userId": mac_address,
+                "userName": name,
+                "status": status,
+                "deviceId": mac_address,
+            },
+        )
+        logger.info(f"✓ Logged attendance: {name} -> {status}")
+        return True
+    except Exception as e:
+        logger.error(f"✗ Error logging attendance for {mac_address}: {e}")
+        return False
+
+
 def update_device_status(mac_address: str, is_connected: bool) -> bool:
     """
     Update a device's status in Convex using the updateDeviceStatus function.
+    Only logs attendance if the status has actually changed (deduplication).
 
     Args:
         mac_address: The MAC address of the device to update
@@ -207,14 +240,42 @@ def update_device_status(mac_address: str, is_connected: bool) -> bool:
     Returns:
         True if the update was successful, False otherwise
     """
+    global device_previous_status
+
     try:
         new_status = "present" if is_connected else "absent"
+        previous_status = device_previous_status.get(mac_address)
+
+        # Only proceed if status has changed
+        if previous_status == new_status:
+            logger.debug(
+                f"Status unchanged for {mac_address}: {new_status} (skipping attendance log)"
+            )
+            # Still update Convex with current status/lastSeen
+            result = convex_client.mutation(
+                "devices:updateDeviceStatus",
+                {"macAddress": mac_address, "status": new_status},
+            )
+            return True
+
+        # Status changed - update and log attendance
         result = convex_client.mutation(
             "devices:updateDeviceStatus", {"macAddress": mac_address, "status": new_status}
         )
         logger.info(
             f"Updated device {mac_address} status to {new_status} -> {result}"
         )
+
+        # Log attendance only for registered devices (not pending)
+        device = get_device_by_mac(mac_address)
+        if device and not device.get("pendingRegistration"):
+            name = device.get("name", mac_address)
+            if device.get("firstName") and device.get("lastName"):
+                name = f"{device['firstName']} {device['lastName']}"
+            log_attendance(mac_address, name, new_status)
+
+        # Update previous status
+        device_previous_status[mac_address] = new_status
         return True
     except Exception as e:
         logger.error(f"Error updating device status for {mac_address}: {e}")
@@ -368,8 +429,9 @@ def run_presence_tracker() -> None:
     """
     Main polling loop for the presence tracker.
 
-    Runs continuously with a 60-second polling interval, checking device
-    connection status and updating Convex as needed.
+    Runs continuously with a 5-second polling interval, checking device
+    connection status and updating Convex as needed. Attendance is only
+    logged when device status actually changes (deduplication).
     """
     logger.info("Starting IEEE Presence Tracker")
     logger.info(f"Polling interval: {POLLING_INTERVAL} seconds")

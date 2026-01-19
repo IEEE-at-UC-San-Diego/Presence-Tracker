@@ -418,10 +418,10 @@ export const getAttendanceLogs = mutation({
 export const cleanupOldLogs = internalMutation({
   args: {},
   handler: async (ctx) => {
-    const fourteenDaysAgo = Date.now() - 14 * 24 * 60 * 60 * 1000;
+    const thirtyDaysAgo = Date.now() - 30 * 24 * 60 * 60 * 1000;
     const oldLogs = await ctx.db
       .query("attendanceLogs")
-      .withIndex("by_timestamp", (q) => q.lt("timestamp", fourteenDaysAgo))
+      .withIndex("by_timestamp", (q) => q.lt("timestamp", thirtyDaysAgo))
       .collect();
 
     for (const log of oldLogs) {
