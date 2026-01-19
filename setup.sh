@@ -64,7 +64,7 @@ sudo apt upgrade -y
 
 # Install BlueZ and Bluetooth tools
 log_info "Installing BlueZ and Bluetooth tools..."
-sudo apt install -y bluez bluez-tools bluetooth python3-dev libbluetooth-dev
+sudo apt install -y bluez bluez-tools bluetooth python3-dev libbluetooth-dev libcairo2-dev libgirepository1.0-dev gir1.2-gtk-3.0 build-essential pkg-config
 
 # Disable exit on error for Bluetooth handling (we warn instead)
 set +e
