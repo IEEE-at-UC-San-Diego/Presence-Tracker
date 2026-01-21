@@ -69,14 +69,13 @@ export const updatePresenceNotifications = internalAction({
 });
 
 async function handleDiscord(ctx: any, platform: "discord", webhookUrl: string, content: string) {
-    const integration = await ctx.runQuery(api.integrations.getIntegrations);
-    const discordIntegration = integration.find((i: any) => i.type === "discord" && i.isEnabled);
+    const integrationMessage = await ctx.runQuery(api.integrations.getIntegrationMessage, { platform });
     let messageSent = false;
 
-    if (discordIntegration?.messageId) {
+    if (integrationMessage?.messageId) {
         // Try to edit existing message
         try {
-            const editUrl = `${webhookUrl}/messages/${discordIntegration.messageId}`;
+            const editUrl = `${webhookUrl}/messages/${integrationMessage.messageId}`;
             const res = await fetch(editUrl, {
                 method: "PATCH",
                 headers: { "Content-Type": "application/json" },
@@ -97,10 +96,15 @@ async function handleDiscord(ctx: any, platform: "discord", webhookUrl: string, 
             headers: { "Content-Type": "application/json" },
             body: JSON.stringify({ content }),
         });
+        if (!res.ok) {
+            const errorText = await res.text();
+            console.error("Discord post error:", res.status, errorText);
+            return;
+        }
         const data = await res.json();
-        if (data.ok && data.id) {
-            await ctx.runMutation(internal.integrations.updateIntegration, {
-                type: "discord",
+        if (data?.id) {
+            await ctx.runMutation(internal.integrations.updateIntegrationMessage, {
+                platform: "discord",
                 messageId: data.id,
             });
         }
@@ -108,11 +112,10 @@ async function handleDiscord(ctx: any, platform: "discord", webhookUrl: string, 
 }
 
 async function handleSlack(ctx: any, platform: "slack", token: string, channel: string, content: string) {
-    const integration = await ctx.runQuery(api.integrations.getIntegrations);
-    const slackIntegration = integration.find((i: any) => i.type === "slack" && i.isEnabled);
+    const integrationMessage = await ctx.runQuery(api.integrations.getIntegrationMessage, { platform });
     let messageSent = false;
 
-    if (slackIntegration?.messageId) {
+    if (integrationMessage?.messageId) {
         // Try update
         const res = await fetch("https://slack.com/api/chat.update", {
             method: "POST",
@@ -122,7 +125,7 @@ async function handleSlack(ctx: any, platform: "slack", token: string, channel: 
             },
             body: JSON.stringify({
                 channel: channel,
-                ts: slackIntegration.messageId,
+                ts: integrationMessage.messageId,
                 text: content
             })
         });
@@ -147,9 +150,10 @@ async function handleSlack(ctx: any, platform: "slack", token: string, channel: 
         });
         const data = await res.json();
         if (data.ok && data.ts) {
-            await ctx.runMutation(internal.integrations.updateIntegration, {
-                type: "slack",
+            await ctx.runMutation(internal.integrations.updateIntegrationMessage, {
+                platform: "slack",
                 messageId: data.ts,
+                channelId: channel,
             });
         }
     }

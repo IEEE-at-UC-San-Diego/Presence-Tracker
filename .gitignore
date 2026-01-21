@@ -38,3 +38,5 @@ uv.lock
 Thumbs.db
 
 .env.local
+
+.log
