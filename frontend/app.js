@@ -1,7 +1,5 @@
 // Initialize Convex Client
-window.convexClient = new convex.ConvexClient(window.CONVEX_URL, {
-    skipConvexDeploymentUrlCheck: true
-});
+window.convexClient = new convex.ConvexClient(window.CONVEX_URL);
 const convexClient = window.convexClient;
 
 // State
