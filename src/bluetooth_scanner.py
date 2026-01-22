@@ -36,6 +36,69 @@ RECONNECT_COOLDOWN = 30
 # How long to consider a device "recently attempted" (seconds)
 RECENT_ATTEMPT_WINDOW = 60
 
+# How long to run bluetoothctl scan for in-range detection (seconds)
+IN_RANGE_SCAN_SECONDS = int(os.getenv("IN_RANGE_SCAN_SECONDS", "5"))
+
+# Whether to disconnect after a successful auto-reconnect to free connection slots
+DISCONNECT_AFTER_SUCCESS = os.getenv("DISCONNECT_AFTER_SUCCESS", "true").lower() in (
+    "1",
+    "true",
+    "yes",
+)
+
+
+def _device_info_indicates_in_range(info_output: str) -> bool:
+    """
+    Heuristic to decide if a device is currently in range based on bluetoothctl info output.
+
+    We treat a device as "in range" if it's connected or has a recent RSSI/TxPower.
+    """
+    if "Connected: yes" in info_output:
+        return True
+    if "RSSI:" in info_output or "TxPower:" in info_output:
+        return True
+    return False
+
+
+def _refresh_bluetooth_scan(duration: int) -> None:
+    """Trigger a short bluetoothctl scan to refresh RSSI for in-range devices."""
+    if duration <= 0:
+        return
+    try:
+        # Newer bluetoothctl supports --timeout
+        result = subprocess.run(
+            ["bluetoothctl", "--timeout", str(duration), "scan", "on"],
+            capture_output=True,
+            text=True,
+            timeout=duration + 2,
+        )
+        if result.returncode == 0:
+            return
+        logger.debug(f"bluetoothctl --timeout scan failed: {result.stderr.strip()}")
+    except FileNotFoundError:
+        logger.error("bluetoothctl not found. Bluetooth may not be available.")
+        return
+    except Exception as e:
+        logger.debug(f"bluetoothctl scan with --timeout failed: {e}")
+
+    # Fallback: start scan, wait, then stop
+    try:
+        subprocess.run(
+            ["bluetoothctl", "scan", "on"],
+            capture_output=True,
+            text=True,
+            timeout=5,
+        )
+        time.sleep(duration)
+        subprocess.run(
+            ["bluetoothctl", "scan", "off"],
+            capture_output=True,
+            text=True,
+            timeout=5,
+        )
+    except Exception as e:
+        logger.debug(f"Fallback bluetoothctl scan failed: {e}")
+
 
 def check_device_connected(mac_address: str) -> bool:
     """
@@ -534,6 +597,9 @@ def scan_for_devices_in_range() -> set[str]:
     """
     devices_in_range: set[str] = set()
 
+    # Refresh bluetoothctl scan data to get recent RSSI readings
+    _refresh_bluetooth_scan(IN_RANGE_SCAN_SECONDS)
+
     # Method 1: Use pybluez to discover visible devices
     try:
         logger.debug("Scanning for discoverable devices using pybluez...")
@@ -573,10 +639,13 @@ def scan_for_devices_in_range() -> set[str]:
                             text=True,
                             timeout=5,
                         )
-                        # If we can get info, the device is in range
-                        if info_result.returncode == 0:
+                        if info_result.returncode == 0 and _device_info_indicates_in_range(
+                            info_result.stdout
+                        ):
                             devices_in_range.add(mac_address)
                             logger.debug(f"Device in range: {mac_address}")
+                        else:
+                            logger.debug(f"Device out of range (no RSSI/connection): {mac_address}")
 
         logger.debug(f"Total devices in range: {len(devices_in_range)}")
     except subprocess.TimeoutExpired:
@@ -587,7 +656,10 @@ def scan_for_devices_in_range() -> set[str]:
     return devices_in_range
 
 
-def auto_reconnect_paired_devices(whitelist_macs: set[str] | None = None) -> dict[str, bool]:
+def auto_reconnect_paired_devices(
+    whitelist_macs: set[str] | None = None,
+    disconnect_after_success: bool | None = None,
+) -> dict[str, bool]:
     """
     Automatically reconnect to paired devices that are detected in range.
 
@@ -601,11 +673,15 @@ def auto_reconnect_paired_devices(whitelist_macs: set[str] | None = None) -> dic
     Args:
         whitelist_macs: Optional set of MAC addresses to limit reconnection attempts to.
                        If provided, only devices in this set will be candidates.
+        disconnect_after_success: If True, disconnect after a successful connection
+                                  to free connection slots.
 
     Returns:
         Dictionary mapping MAC addresses to connection results (True=success, False=failed)
     """
     results: dict[str, bool] = {}
+    if disconnect_after_success is None:
+        disconnect_after_success = DISCONNECT_AFTER_SUCCESS
 
     try:
         logger.info("=== Starting auto-reconnection cycle ===")
@@ -661,6 +737,8 @@ def auto_reconnect_paired_devices(whitelist_macs: set[str] | None = None) -> dic
 
             if success:
                 logger.info(f"✓ Successfully auto-reconnected to: {mac_address}")
+                if disconnect_after_success:
+                    disconnect_device(mac_address)
             else:
                 logger.warning(f"✗ Failed to auto-reconnect to: {mac_address}")
 

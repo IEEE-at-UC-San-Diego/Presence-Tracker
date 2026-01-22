@@ -56,6 +56,16 @@ POLLING_INTERVAL = 5
 # Grace period for new device registration in seconds
 GRACE_PERIOD_SECONDS = int(os.getenv("GRACE_PERIOD_SECONDS", "300"))
 
+# Presence TTL for recently seen devices (seconds)
+PRESENT_TTL_SECONDS = int(os.getenv("PRESENT_TTL_SECONDS", "120"))
+
+# Disconnect connected devices after each cycle to free connection slots
+DISCONNECT_CONNECTED_AFTER_CYCLE = os.getenv("DISCONNECT_CONNECTED_AFTER_CYCLE", "true").lower() in (
+    "1",
+    "true",
+    "yes",
+)
+
 # Track devices that failed to register, so we retry them
 failed_registrations: set[str] = set()
 
@@ -64,6 +74,9 @@ failed_connection_attempts: dict[str, int] = {}
 
 # Track previous status of each device for deduplication
 device_previous_status: dict[str, str] = {}
+
+# Track devices seen recently to smooth presence when disconnecting after checks
+recently_seen_devices: dict[str, float] = {}
 
 # Threshold for consecutive failed connections before backing off
 FAILED_CONNECTION_THRESHOLD = 3
@@ -387,82 +400,68 @@ def check_and_update_devices() -> None:
 
     # PRE-SCAN RECONNECTION:
     # Attempt to reconnect to any known, registered devices that are in range but disconnected.
-    # This prevents blocking on individual device checks later.
+    # Successful connections are treated as "present" even if we immediately disconnect.
     registered_macs = {
-        d.get("macAddress") 
-        for d in devices 
+        d.get("macAddress")
+        for d in devices
         if d.get("macAddress") and not d.get("pendingRegistration")
     }
-    
+
+    reconnect_results: dict[str, bool] = {}
+    reconnected_success: set[str] = set()
+
     if registered_macs:
         logger.info(f"Running auto-reconnect for {len(registered_macs)} registered device(s)...")
-        reconnect_results = bluetooth_scanner.auto_reconnect_paired_devices(whitelist_macs=registered_macs)
-        
-        # If any succeeded, refresh our connected list
-        if any(reconnect_results.values()):
-            logger.info("Some devices reconnected, refreshing connected list...")
-            connected_devices = scan_all_connected_devices()
-            connected_set = set(connected_devices)
+        reconnect_results = bluetooth_scanner.auto_reconnect_paired_devices(
+            whitelist_macs=registered_macs,
+            disconnect_after_success=True,
+        )
+        reconnected_success = {mac for mac, success in reconnect_results.items() if success}
+
+    # Track recently seen devices (connected or successfully pinged)
+    now = time.time()
+    for mac in connected_set | reconnected_success:
+        recently_seen_devices[mac] = now
+
+    present_set = {
+        mac
+        for mac, last_seen in recently_seen_devices.items()
+        if now - last_seen <= PRESENT_TTL_SECONDS
+    }
+    # Prune expired entries
+    for mac in list(recently_seen_devices):
+        if mac not in present_set:
+            del recently_seen_devices[mac]
+
+    logger.info(f"Present devices (connected/recently seen): {len(present_set)} device(s)")
 
     updated_count = 0
     newly_registered_count = 0
 
-    # Process each connected device
-    for mac_address in connected_devices:
+    # Register new devices based on current connections
+    for mac_address in connected_set:
         device = get_device_by_mac(mac_address)
-
         if device:
-            # Device exists in Convex
-            name = device.get("name")
-            current_status = device.get("status", "unknown")
+            failed_registrations.discard(mac_address)
+            continue
 
-            if name:
-                display_name = name
-            else:
-                display_name = f"[pending] {mac_address}"
+        # New device - register as pending with device name from Bluetooth
+        if mac_address in failed_registrations:
+            logger.info(
+                f"Retrying registration for previously failed device: {mac_address}"
+            )
 
-            logger.info(f"Checking device: {display_name} ({mac_address})")
-
-            # Update only when status changes
-            new_status = "present"
-            if new_status != current_status:
-                logger.info(
-                    f"Status changed for {display_name} ({mac_address}): "
-                    f"{current_status} -> {new_status}"
-                )
-                if update_device_status(mac_address, True, current_status):
-                    updated_count += 1
-                
-                # Identify if this was a recent reconnection
-                # Note: We can't easily know if it was *just* reconnected, but we can clear failed attempts
-                if mac_address in failed_connection_attempts:
-                     failed_connection_attempts.pop(mac_address, None)
-            else:
-                logger.debug(f"No status change for {display_name} ({mac_address}): {current_status}")
-            
-            # Remove from failed registrations if device is now known
+        device_name = bluetooth_scanner.get_device_name(mac_address)
+        logger.info(
+            f"New device detected: {mac_address} ({device_name or 'unknown'}) - registering as pending"
+        )
+        if register_new_device(mac_address, device_name):
+            newly_registered_count += 1
             failed_registrations.discard(mac_address)
         else:
-            # New device - register as pending with device name from Bluetooth
-            # Check if we've tried registering this device before and failed
-            if mac_address in failed_registrations:
-                logger.info(
-                    f"Retrying registration for previously failed device: {mac_address}"
-                )
-            
-            # Get device name from Bluetooth
-            device_name = bluetooth_scanner.get_device_name(mac_address)
-            logger.info(
-                f"New device detected: {mac_address} ({device_name or 'unknown'}) - registering as pending"
-            )
-            if register_new_device(mac_address, device_name):
-                newly_registered_count += 1
-                failed_registrations.discard(mac_address)
-            else:
-                # Track failed registration for retry on next cycle
-                failed_registrations.add(mac_address)
+            failed_registrations.add(mac_address)
 
-    # Process known devices that are NOT connected
+    # Update status for known devices based on presence set
     for device in devices:
         mac_address = device.get("macAddress")
         if not mac_address:
@@ -476,26 +475,25 @@ def check_and_update_devices() -> None:
         else:
             display_name = f"[pending] {mac_address}"
 
-        if mac_address not in connected_set:
-            logger.info(f"Checking device: {display_name} ({mac_address})")
+        is_present = mac_address in present_set
+        new_status = "present" if is_present else "absent"
 
-            # Device is not connected
-            # Attempting auto-connect is now handled in bulk at the start of the cycle
-            
-            # Check if this device has failed too many connection attempts (tracked by the scanner's cooldown)
-            # but we also track consecutive failures here for reporting if needed
-            
-            # Mark as absent
-            new_status = "absent"
-            if new_status != current_status:
-                logger.info(
-                    f"Status changed for {display_name} ({mac_address}): "
-                    f"{current_status} -> {new_status}"
-                )
-                if update_device_status(mac_address, False, current_status):
-                    updated_count += 1
-            else:
-                logger.debug(f"No status change for {display_name} ({mac_address}): {current_status}")
+        if new_status != current_status:
+            logger.info(
+                f"Status changed for {display_name} ({mac_address}): "
+                f"{current_status} -> {new_status}"
+            )
+            if update_device_status(mac_address, is_present, current_status):
+                updated_count += 1
+        else:
+            logger.debug(f"No status change for {display_name} ({mac_address}): {current_status}")
+            device_previous_status[mac_address] = new_status
+
+    # Optionally disconnect devices to avoid hitting adapter connection limits
+    if DISCONNECT_CONNECTED_AFTER_CYCLE and connected_set:
+        logger.info(f"Disconnecting {len(connected_set)} device(s) to free slots")
+        for mac_address in connected_set:
+            bluetooth_scanner.disconnect_device(mac_address)
 
     # Clean up expired grace periods
     cleanup_expired_devices()
@@ -523,6 +521,8 @@ def run_presence_tracker() -> None:
     logger.info("Starting IEEE Presence Tracker")
     logger.info(f"Polling interval: {POLLING_INTERVAL} seconds")
     logger.info(f"Grace period for new devices: {GRACE_PERIOD_SECONDS} seconds")
+    logger.info(f"Presence TTL: {PRESENT_TTL_SECONDS} seconds")
+    logger.info(f"Disconnect after cycle: {DISCONNECT_CONNECTED_AFTER_CYCLE}")
     logger.info(f"Convex query timeout: {CONVEX_QUERY_TIMEOUT} seconds")
 
     # Skip startup cleanup to avoid hanging on Convex connection

@@ -13,7 +13,7 @@ __pycache__/
 *.so
 
 # Log files
-*.log
+*.log*
 presence_tracker.log*
 
 # Convex local state
