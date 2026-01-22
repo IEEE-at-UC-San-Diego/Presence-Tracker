@@ -59,6 +59,21 @@ GRACE_PERIOD_SECONDS = int(os.getenv("GRACE_PERIOD_SECONDS", "300"))
 # Presence TTL for recently seen devices (seconds)
 PRESENT_TTL_SECONDS = int(os.getenv("PRESENT_TTL_SECONDS", "120"))
 
+# Full probe interval (seconds): attempt connect+disconnect to each device
+FULL_PROBE_ENABLED = os.getenv("FULL_PROBE_ENABLED", "true").lower() in (
+    "1",
+    "true",
+    "yes",
+)
+FULL_PROBE_INTERVAL_SECONDS = int(os.getenv("FULL_PROBE_INTERVAL_SECONDS", "60"))
+FULL_PROBE_DISCONNECT_AFTER = os.getenv("FULL_PROBE_DISCONNECT_AFTER", "true").lower() in (
+    "1",
+    "true",
+    "yes",
+)
+
+
+
 # Disconnect connected devices after each cycle to free connection slots
 DISCONNECT_CONNECTED_AFTER_CYCLE = os.getenv("DISCONNECT_CONNECTED_AFTER_CYCLE", "true").lower() in (
     "1",
@@ -77,6 +92,9 @@ device_previous_status: dict[str, str] = {}
 
 # Track devices seen recently to smooth presence when disconnecting after checks
 recently_seen_devices: dict[str, float] = {}
+
+# Track when the last full probe ran
+last_full_probe_time = 0.0
 
 # Threshold for consecutive failed connections before backing off
 FAILED_CONNECTION_THRESHOLD = 3
@@ -385,6 +403,7 @@ def check_and_update_devices() -> None:
     - Cleans up expired pending devices at end of cycle
     """
     global failed_registrations
+    global last_full_probe_time
 
     # Get all connected Bluetooth devices
     connected_devices = scan_all_connected_devices()
@@ -398,9 +417,8 @@ def check_and_update_devices() -> None:
     else:
         logger.info(f"Found {len(devices)} known device(s) in Convex")
 
-    # PRE-SCAN RECONNECTION:
-    # Attempt to reconnect to any known, registered devices that are in range but disconnected.
-    # Successful connections are treated as "present" even if we immediately disconnect.
+    # PRE-SCAN RECONNECTION / FULL PROBE:
+    # Attempt to reconnect (or fully probe) known devices to detect presence.
     registered_macs = {
         d.get("macAddress")
         for d in devices
@@ -410,16 +428,21 @@ def check_and_update_devices() -> None:
     reconnect_results: dict[str, bool] = {}
     reconnected_success: set[str] = set()
 
-    if registered_macs:
-        logger.info(f"Running auto-reconnect for {len(registered_macs)} registered device(s)...")
-        reconnect_results = bluetooth_scanner.auto_reconnect_paired_devices(
-            whitelist_macs=registered_macs,
-            disconnect_after_success=True,
+    now = time.time()
+
+    # Always use full probe mode (connect + disconnect) to check presence
+    if registered_macs and FULL_PROBE_ENABLED:
+        logger.info(
+            f"Running full probe for {len(registered_macs)} registered device(s)..."
         )
+        reconnect_results = bluetooth_scanner.probe_devices(
+            sorted(registered_macs),
+            disconnect_after=FULL_PROBE_DISCONNECT_AFTER,
+        )
+        last_full_probe_time = now
         reconnected_success = {mac for mac, success in reconnect_results.items() if success}
 
     # Track recently seen devices (connected or successfully pinged)
-    now = time.time()
     for mac in connected_set | reconnected_success:
         recently_seen_devices[mac] = now
 
@@ -478,6 +501,8 @@ def check_and_update_devices() -> None:
         is_present = mac_address in present_set
         new_status = "present" if is_present else "absent"
 
+
+
         if new_status != current_status:
             logger.info(
                 f"Status changed for {display_name} ({mac_address}): "
@@ -522,6 +547,10 @@ def run_presence_tracker() -> None:
     logger.info(f"Polling interval: {POLLING_INTERVAL} seconds")
     logger.info(f"Grace period for new devices: {GRACE_PERIOD_SECONDS} seconds")
     logger.info(f"Presence TTL: {PRESENT_TTL_SECONDS} seconds")
+    logger.info(f"Full probe enabled: {FULL_PROBE_ENABLED}")
+    logger.info(f"Full probe interval: {FULL_PROBE_INTERVAL_SECONDS} seconds")
+    logger.info(f"Full probe disconnect after: {FULL_PROBE_DISCONNECT_AFTER}")
+
     logger.info(f"Disconnect after cycle: {DISCONNECT_CONNECTED_AFTER_CYCLE}")
     logger.info(f"Convex query timeout: {CONVEX_QUERY_TIMEOUT} seconds")
 

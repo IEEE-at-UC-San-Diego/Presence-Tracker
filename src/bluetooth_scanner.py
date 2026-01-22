@@ -36,6 +36,9 @@ RECONNECT_COOLDOWN = 30
 # How long to consider a device "recently attempted" (seconds)
 RECENT_ATTEMPT_WINDOW = 60
 
+# How long to wait for bluetoothctl connect attempts (seconds)
+CONNECT_TIMEOUT_SECONDS = int(os.getenv("CONNECT_TIMEOUT_SECONDS", "10"))
+
 # How long to run bluetoothctl scan for in-range detection (seconds)
 IN_RANGE_SCAN_SECONDS = int(os.getenv("IN_RANGE_SCAN_SECONDS", "5"))
 
@@ -45,6 +48,14 @@ DISCONNECT_AFTER_SUCCESS = os.getenv("DISCONNECT_AFTER_SUCCESS", "true").lower()
     "true",
     "yes",
 )
+
+# Whether to probe paired devices if scan finds nothing in range
+ALLOW_PAIRED_PROBE_ON_EMPTY_SCAN = os.getenv(
+    "ALLOW_PAIRED_PROBE_ON_EMPTY_SCAN", "true"
+).lower() in ("1", "true", "yes")
+
+# Cap reconnection attempts per cycle to avoid long stalls
+MAX_RECONNECT_PER_CYCLE = int(os.getenv("MAX_RECONNECT_PER_CYCLE", "4"))
 
 
 def _device_info_indicates_in_range(info_output: str) -> bool:
@@ -413,7 +424,7 @@ def connect_device(mac_address: str) -> bool:
             ["bluetoothctl", "connect", mac_address],
             capture_output=True,
             text=True,
-            timeout=15,  # Connection can take time
+            timeout=CONNECT_TIMEOUT_SECONDS,  # Connection can take time
         )
 
         if "Connection successful" in result.stdout or check_device_connected(mac_address):
@@ -585,6 +596,42 @@ def _cleanup_old_attempts() -> None:
             logger.debug(f"Cleaned up {len(to_remove)} old connection attempt records")
 
 
+def _pick_reconnect_candidates(candidates: set[str], max_count: int) -> list[str]:
+    """
+    Pick a fair subset of reconnection candidates based on last attempt time.
+
+    Oldest (or never attempted) devices are tried first.
+    """
+    if max_count <= 0:
+        return list(candidates)
+
+    def last_attempt(mac: str) -> float:
+        return _last_connection_attempts.get(mac, 0)
+
+    return sorted(candidates, key=last_attempt)[:max_count]
+
+
+def probe_devices(mac_addresses: list[str], disconnect_after: bool = True) -> dict[str, bool]:
+    """
+    Probe devices by attempting a connect and optional disconnect.
+
+    Args:
+        mac_addresses: List of MAC addresses to probe.
+        disconnect_after: Whether to disconnect after a successful connect.
+
+    Returns:
+        Dictionary mapping MAC address to connection result.
+    """
+    results: dict[str, bool] = {}
+    for mac_address in mac_addresses:
+        logger.info(f"Probing device: {mac_address}")
+        success = connect_device(mac_address)
+        results[mac_address] = success
+        if success and disconnect_after:
+            disconnect_device(mac_address)
+    return results
+
+
 def scan_for_devices_in_range() -> set[str]:
     """
     Scan for Bluetooth devices that are currently in range.
@@ -703,6 +750,10 @@ def auto_reconnect_paired_devices(
         devices_in_range = scan_for_devices_in_range()
         logger.info(f"Devices in range: {len(devices_in_range)} device(s)")
 
+        if not devices_in_range and ALLOW_PAIRED_PROBE_ON_EMPTY_SCAN:
+            logger.info("No devices detected in range; probing paired devices instead")
+            devices_in_range = paired_set
+
         # Find paired devices that are in range but not connected
         devices_to_connect = (paired_set & devices_in_range) - connected_set
 
@@ -716,6 +767,14 @@ def auto_reconnect_paired_devices(
         if not devices_to_connect:
             logger.info("No paired devices in range that need connection")
             return results
+
+        if MAX_RECONNECT_PER_CYCLE > 0 and len(devices_to_connect) > MAX_RECONNECT_PER_CYCLE:
+            logger.info(
+                f"Limiting reconnect attempts: {len(devices_to_connect)} -> {MAX_RECONNECT_PER_CYCLE}"
+            )
+            devices_to_connect = set(
+                _pick_reconnect_candidates(devices_to_connect, MAX_RECONNECT_PER_CYCLE)
+            )
 
         logger.info(f"Attempting to connect to {len(devices_to_connect)} device(s)")
 
