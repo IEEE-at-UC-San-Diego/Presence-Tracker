@@ -1,6 +1,8 @@
 // Logs Page Logic
 let allLogs = [];
 let currentView = 'by-person';
+let selectedPerson = null;
+let selectedDate = null;
 
 window.showLogsView = async function() {
     const mainApp = document.getElementById('main-app');
@@ -25,6 +27,7 @@ window.showLogsView = async function() {
     logsView.style.display = 'block';
 
     await fetchLogs();
+    setupEventListeners();
 }
 
 window.hideLogsView = function() {
@@ -43,11 +46,52 @@ async function fetchLogs() {
     try {
         const adminPassword = sessionStorage.getItem('ieee_presence_password') || '';
         allLogs = await window.convexClient.query("devices:getAttendanceLogs", { adminPassword });
+        populatePersonSelect();
         renderCurrentView();
     } catch (error) {
         console.error('Error fetching logs:', error);
         logsContent.innerHTML = `<div class="empty-state">Error loading logs: ${error.message}</div>`;
     }
+}
+
+function setupEventListeners() {
+    const personSelect = document.getElementById('person-select');
+    const datePicker = document.getElementById('date-picker');
+
+    if (personSelect && !personSelect.dataset.setup) {
+        personSelect.addEventListener('change', handlePersonChange);
+        personSelect.dataset.setup = 'true';
+    }
+
+    if (datePicker && !datePicker.dataset.setup) {
+        datePicker.addEventListener('change', handleDateChange);
+        datePicker.dataset.setup = 'true';
+    }
+}
+
+function populatePersonSelect() {
+    const personSelect = document.getElementById('person-select');
+    if (!personSelect) return;
+
+    const persons = [...new Set(allLogs.map(log => log.userName).filter(Boolean))].sort();
+
+    personSelect.innerHTML = '<option value="">-- Choose a person --</option>';
+    persons.forEach(person => {
+        const option = document.createElement('option');
+        option.value = person;
+        option.textContent = person;
+        personSelect.appendChild(option);
+    });
+}
+
+function handlePersonChange(e) {
+    selectedPerson = e.target.value;
+    renderCurrentView();
+}
+
+function handleDateChange(e) {
+    selectedDate = e.target.value;
+    renderCurrentView();
 }
 
 window.switchTab = function(tabName) {
@@ -56,6 +100,19 @@ window.switchTab = function(tabName) {
     document.querySelectorAll('.log-tab').forEach(tab => {
         tab.classList.toggle('active', tab.dataset.tab === tabName);
     });
+
+    const personFilter = document.getElementById('person-filter');
+    const dateFilter = document.getElementById('date-filter');
+
+    if (currentView === 'by-person') {
+        personFilter.style.display = 'flex';
+        dateFilter.style.display = 'none';
+        selectedDate = null;
+    } else {
+        personFilter.style.display = 'none';
+        dateFilter.style.display = 'flex';
+        selectedPerson = null;
+    }
 
     renderCurrentView();
 }
@@ -76,53 +133,71 @@ function renderCurrentView() {
 }
 
 function renderLogsByPerson(container) {
-    const logsByPerson = {};
+    if (!selectedPerson) {
+        container.innerHTML = '<div class="empty-state">Please select a person to view their logs.</div>';
+        return;
+    }
 
-    allLogs.forEach(log => {
-        const personName = log.userName || 'Unknown';
-        if (!logsByPerson[personName]) {
-            logsByPerson[personName] = [];
-        }
-        logsByPerson[personName].push(log);
-    });
+    const personLogs = allLogs.filter(log => log.userName === selectedPerson);
 
-    const sortedPersons = Object.keys(logsByPerson).sort();
+    if (personLogs.length === 0) {
+        container.innerHTML = '<div class="empty-state">No logs found for this person.</div>';
+        return;
+    }
 
-    let html = '';
+    personLogs.sort((a, b) => b.timestamp - a.timestamp);
 
-    sortedPersons.forEach((personName, index) => {
-        const logs = logsByPerson[personName];
-        logs.sort((a, b) => b.timestamp - a.timestamp);
-
-        html += `
-            <div class="person-group">
-                <div class="person-header" onclick="togglePersonGroup(${index})">
-                    <div class="person-info">
-                        <strong>${escapeHtml(personName)}</strong>
-                        <span class="log-count">${logs.length} changes</span>
-                    </div>
-                    <span class="toggle-icon">▼</span>
-                </div>
-                <div class="person-logs" data-person-index="${index}">
-                    ${logs.map(log => renderLogEntry(log)).join('')}
-                </div>
+    let html = `
+        <div class="person-single-view">
+            <div class="person-single-header">
+                <strong>${escapeHtml(selectedPerson)}</strong>
+                <span class="log-count">${personLogs.length} entries</span>
             </div>
-        `;
-    });
+            <div class="logs-list">
+                ${personLogs.map(log => renderLogEntry(log)).join('')}
+            </div>
+        </div>
+    `;
 
     container.innerHTML = html;
 }
 
 function renderLogsByDate(container) {
-    const sortedLogs = [...allLogs].sort((a, b) => b.timestamp - a.timestamp);
+    if (!selectedDate) {
+        container.innerHTML = '<div class="empty-state">Please select a date to view logs.</div>';
+        return;
+    }
 
-    let html = '<div class="logs-list">';
+    const startDate = new Date(selectedDate);
+    startDate.setHours(0, 0, 0, 0);
 
-    sortedLogs.forEach(log => {
-        html += renderLogEntry(log);
+    const endDate = new Date(selectedDate);
+    endDate.setHours(23, 59, 59, 999);
+
+    const dateLogs = allLogs.filter(log => {
+        const logDate = new Date(log.timestamp);
+        return logDate >= startDate && logDate <= endDate;
     });
 
-    html += '</div>';
+    if (dateLogs.length === 0) {
+        container.innerHTML = '<div class="empty-state">No logs found for this date.</div>';
+        return;
+    }
+
+    dateLogs.sort((a, b) => b.timestamp - a.timestamp);
+
+    let html = `
+        <div class="date-view">
+            <div class="date-header">
+                <strong>${escapeHtml(new Date(selectedDate).toLocaleDateString())}</strong>
+                <span class="log-count">${dateLogs.length} entries</span>
+            </div>
+            <div class="logs-list">
+                ${dateLogs.map(log => renderLogEntry(log)).join('')}
+            </div>
+        </div>
+    `;
+
     container.innerHTML = html;
 }
 
@@ -147,85 +222,57 @@ function renderLogEntry(log) {
     `;
 }
 
-window.togglePersonGroup = function(index) {
-    const group = document.querySelector(`.person-logs[data-person-index="${index}"]`);
-    const icon = group.closest('.person-group').querySelector('.toggle-icon');
-
-    if (group.style.display === 'none') {
-        group.style.display = 'block';
-        icon.style.transform = 'rotate(0deg)';
-    } else {
-        group.style.display = 'none';
-        icon.style.transform = 'rotate(-90deg)';
-    }
-}
-
 window.exportToCSV = function() {
     if (!window.isAdmin()) {
         showToast('Admin access required', 'error');
         return;
     }
 
-    if (allLogs.length === 0) {
+    let logsToExport = [];
+    let filenamePrefix = 'logs';
+
+    if (currentView === 'by-person') {
+        if (!selectedPerson) {
+            showToast('Please select a person to export', 'error');
+            return;
+        }
+        logsToExport = allLogs.filter(log => log.userName === selectedPerson);
+        filenamePrefix = `logs-${encodeURIComponent(selectedPerson)}`;
+    } else {
+        if (!selectedDate) {
+            showToast('Please select a date to export', 'error');
+            return;
+        }
+        const startDate = new Date(selectedDate);
+        startDate.setHours(0, 0, 0, 0);
+        const endDate = new Date(selectedDate);
+        endDate.setHours(23, 59, 59, 999);
+        logsToExport = allLogs.filter(log => {
+            const logDate = new Date(log.timestamp);
+            return logDate >= startDate && logDate <= endDate;
+        });
+        filenamePrefix = `logs-${selectedDate}`;
+    }
+
+    if (logsToExport.length === 0) {
         showToast('No logs to export', 'error');
         return;
     }
 
-    let csv = '';
-    let rows = [];
+    const csv = 'Person Name,Device ID,Status,Timestamp\n';
+    const sortedLogs = logsToExport.sort((a, b) => b.timestamp - a.timestamp);
+    
+    let csvContent = csv;
+    sortedLogs.forEach(log => {
+        const date = new Date(log.timestamp);
+        csvContent += `"${escapeCsv(log.userName)}","${escapeCsv(log.deviceId)}","${escapeCsv(log.status)}","${escapeCsv(date.toISOString())}"\n`;
+    });
 
-    if (currentView === 'by-person') {
-        csv = 'Person Name,Device ID,Status,Timestamp\n';
-
-        const logsByPerson = {};
-        allLogs.forEach(log => {
-            const personName = log.userName || 'Unknown';
-            if (!logsByPerson[personName]) {
-                logsByPerson[personName] = [];
-            }
-            logsByPerson[personName].push(log);
-        });
-
-        const sortedPersons = Object.keys(logsByPerson).sort();
-        sortedPersons.forEach(personName => {
-            const logs = logsByPerson[personName];
-            logs.sort((a, b) => b.timestamp - a.timestamp);
-
-            rows.push({ separator: true, value: personName });
-            logs.forEach(log => {
-                const date = new Date(log.timestamp);
-                rows.push({
-                    personName: log.userName,
-                    deviceId: log.deviceId,
-                    status: log.status,
-                    timestamp: date.toISOString()
-                });
-            });
-        });
-
-        rows.forEach(row => {
-            if (row.separator) {
-                csv += `"${escapeCsv(row.value)}"\n`;
-            } else {
-                csv += `"${escapeCsv(row.personName)}","${escapeCsv(row.deviceId)}","${escapeCsv(row.status)}","${escapeCsv(row.timestamp)}"\n`;
-            }
-        });
-
-    } else {
-        csv = 'Person Name,Device ID,Status,Timestamp\n';
-
-        const sortedLogs = [...allLogs].sort((a, b) => b.timestamp - a.timestamp);
-        sortedLogs.forEach(log => {
-            const date = new Date(log.timestamp);
-            csv += `"${escapeCsv(log.userName)}","${escapeCsv(log.deviceId)}","${escapeCsv(log.status)}","${escapeCsv(date.toISOString())}"\n`;
-        });
-    }
-
-    const blob = new Blob([csv], { type: 'text/csv;charset=utf-8;' });
+    const blob = new Blob([csvContent], { type: 'text/csv;charset=utf-8;' });
     const link = document.createElement('a');
     const url = URL.createObjectURL(blob);
     link.setAttribute('href', url);
-    link.setAttribute('download', `presence-logs-${currentView}-${Date.now()}.csv`);
+    link.setAttribute('download', `${filenamePrefix}-${Date.now()}.csv`);
     link.style.visibility = 'hidden';
     document.body.appendChild(link);
     link.click();

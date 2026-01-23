@@ -998,3 +998,82 @@ body:not(.role-admin) .admin-only {
     border-radius: var(--radius);
     overflow: hidden;
 }
+
+/* Logs Filter Container */
+.logs-filter-container {
+    margin-bottom: 1rem;
+}
+
+.logs-filter {
+    display: flex;
+    align-items: center;
+    gap: 0.75rem;
+    padding: 0.75rem 1rem;
+    background: var(--bg-app);
+    border: 1px solid var(--border);
+    border-radius: var(--radius);
+}
+
+.logs-filter label {
+    font-size: 0.8rem;
+    font-weight: 500;
+    color: var(--text-secondary);
+    white-space: nowrap;
+}
+
+.logs-filter select,
+.logs-filter input[type="date"] {
+    padding: 0.4rem 0.6rem;
+    border: 1px solid var(--border);
+    border-radius: 3px;
+    font-family: inherit;
+    font-size: 0.85rem;
+    background: white;
+    color: var(--text-main);
+    min-width: 180px;
+}
+
+.logs-filter select:focus,
+.logs-filter input[type="date"]:focus {
+    outline: none;
+    border-color: var(--primary);
+    box-shadow: 0 0 0 2px rgba(2, 132, 199, 0.1);
+}
+
+/* Person Single View */
+.person-single-view {
+    border: 1px solid var(--border);
+    border-radius: var(--radius);
+    overflow: hidden;
+}
+
+.person-single-header {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    padding: 0.75rem 1rem;
+    background: var(--bg-app);
+    border-bottom: 1px solid var(--border);
+}
+
+/* Date View */
+.date-view {
+    border: 1px solid var(--border);
+    border-radius: var(--radius);
+    overflow: hidden;
+}
+
+.date-header {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    padding: 0.75rem 1rem;
+    background: var(--bg-app);
+    border-bottom: 1px solid var(--border);
+}
+
+.date-header strong {
+    font-size: 0.9rem;
+    font-weight: 600;
+    color: var(--text-main);
+}
