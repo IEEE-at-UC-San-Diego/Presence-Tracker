@@ -55,13 +55,18 @@ jobs:
           
           echo "window.CONVEX_URL = '$CONVEX_URL';" > frontend/config.js
           echo "window.DEPLOYMENT_MODE = '$CONVEX_URL_MODE';" >> frontend/config.js
-          
+
+          # Organization name (fallback to "Presence Tracker" if not set)
+          ORGANIZATION_NAME="${ORGANIZATION_NAME:-Presence Tracker}"
+          echo "window.ORGANIZATION_NAME = '$ORGANIZATION_NAME';" >> frontend/config.js
+
           echo "Generated config.js:"
           cat frontend/config.js
         env:
           CONVEX_URL_MODE: ${{ secrets.CONVEX_URL_MODE }}
           CONVEX_DEPLOYMENT_URL: ${{ secrets.CONVEX_DEPLOYMENT_URL }}
           CONVEX_SELF_HOSTED_URL: ${{ secrets.CONVEX_SELF_HOSTED_URL }}
+          ORGANIZATION_NAME: ${{ secrets.ORGANIZATION_NAME }}
 
       - name: Upload artifact
         uses: actions/upload-pages-artifact@v3

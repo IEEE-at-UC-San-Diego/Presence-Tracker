@@ -216,15 +216,16 @@ You can automatically deploy the web dashboard to GitHub Pages using GitHub Acti
 
 **Setup Steps:**
 
-1. **Add GitHub Secrets**
+ 1. **Add GitHub Secrets**
 
-   Go to your repository **Settings > Secrets and variables > Actions** and add:
+    Go to your repository **Settings > Secrets and variables > Actions** and add:
 
-   | Secret Name | Value | Required |
-   |-------------|-------|----------|
-   | `CONVEX_DEPLOYMENT_URL` | Your Convex backend URL (e.g., `https://chatty-akita-508.convex.cloud`) | ✅ Yes |
-   | `CONVEX_URL_MODE` | `convex` (default) or `selfhosted` | Optional |
-   | `CONVEX_SELF_HOSTED_URL` | Self-hosted Convex URL | Only for self-hosted |
+    | Secret Name | Value | Required |
+    |-------------|-------|----------|
+    | `CONVEX_DEPLOYMENT_URL` | Your Convex backend URL (e.g., `https://chatty-akita-508.convex.cloud`) | ✅ Yes |
+    | `CONVEX_URL_MODE` | `convex` (default) or `selfhosted` | Optional |
+    | `CONVEX_SELF_HOSTED_URL` | Self-hosted Convex URL | Only for self-hosted |
+    | `ORGANIZATION_NAME` | Your organization name for UI customization (e.g., "My Company") | Optional |
 
 2. **Enable GitHub Pages**
 
@@ -310,11 +311,15 @@ Choose one of the deployment options:
 
 **Option A: GitHub Pages (Recommended)**
 1. Follow the [Deploy Web Dashboard to GitHub Pages](#deploy-web-dashboard-to-github-pages) section
-2. Add the `CONVEX_DEPLOYMENT_URL` secret in GitHub
+2. Add the following secrets in GitHub Settings:
+   - `CONVEX_DEPLOYMENT_URL` (required)
+   - `ORGANIZATION_NAME` (optional) - Your organization name for UI customization
 3. Push to `main` to trigger deployment
 
 **Option B: Docker**
-1. Set `CONVEX_DEPLOYMENT_URL` in your `.env` file
+1. Set environment variables in your `.env` file:
+   - `CONVEX_DEPLOYMENT_URL` (required)
+   - `ORGANIZATION_NAME` (optional) - Your organization name for UI customization
 2. Run `docker-compose up -d`
 3. Access at `http://localhost:3000`
 
@@ -384,6 +389,7 @@ The web dashboard uses password authentication to protect access. Configure thes
 |----------|-------------|----------|
 | `AUTH_PASSWORD` | Regular user password - provides view-only access | ✅ Yes |
 | `ADMIN_PASSWORD` | Admin password - provides full access to all features (edit, delete, manage) | Optional |
+| `ORGANIZATION_NAME` | Organization name for UI customization (fallback if not set in deployment config) | Optional |
 
 **Setting up Authentication:**
 

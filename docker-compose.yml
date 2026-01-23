@@ -8,6 +8,7 @@ services:
       - CONVEX_URL_MODE=${CONVEX_URL_MODE:-convex}
       - CONVEX_DEPLOYMENT_URL=${CONVEX_DEPLOYMENT_URL}
       - CONVEX_SELF_HOSTED_URL=${CONVEX_SELF_HOSTED_URL}
+      - ORGANIZATION_NAME=${ORGANIZATION_NAME:-Presence Tracker}
     restart: always
 
 # Note: presence-tracker.service runs on the host (Raspberry Pi) to access Bluetooth hardware.

@@ -26,5 +26,9 @@ fi
 # Deployment mode
 export DEPLOYMENT_MODE="${DEPLOYMENT_MODE:-${MODE}}"
 
+# Organization name (fallback if not set)
+export ORGANIZATION_NAME="${ORGANIZATION_NAME:-Presence Tracker}"
+
 echo "window.CONVEX_URL = '$URL';" > /usr/share/nginx/html/config.js
 echo "window.DEPLOYMENT_MODE = '$DEPLOYMENT_MODE';" >> /usr/share/nginx/html/config.js
+echo "window.ORGANIZATION_NAME = '$ORGANIZATION_NAME';" >> /usr/share/nginx/html/config.js

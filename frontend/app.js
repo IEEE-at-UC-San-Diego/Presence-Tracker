@@ -40,6 +40,14 @@ window.initializeApp = async function () {
 }
 
 async function fetchAndSetOrganizationName() {
+    // Use environment-injected value first
+    if (window.ORGANIZATION_NAME && window.ORGANIZATION_NAME !== "Presence Tracker") {
+        organizationName = window.ORGANIZATION_NAME;
+        updateOrganizationNameInUI();
+        return;
+    }
+
+    // Fallback to Convex query
     if (!convexClient) {
         console.warn('Convex client not available, using default organization name');
         return;
@@ -93,6 +101,12 @@ function updateOrganizationNameInUI() {
             el.textContent = text.replace('members', `${organizationName} members`);
         }
     });
+
+    // Update logs title (if it exists)
+    const logsTitle = document.getElementById('logs-title');
+    if (logsTitle) {
+        logsTitle.textContent = `${organizationName} Device Logs`;
+    }
 }
 
 function setupConvexSubscription() {
