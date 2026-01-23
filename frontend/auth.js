@@ -3,6 +3,7 @@
 
 const AUTH_SESSION_KEY = 'ieee_presence_authenticated';
 const AUTH_ROLE_KEY = 'ieee_presence_role';
+const AUTH_PASSWORD_KEY = 'ieee_presence_password';
 
 // Check if already authenticated on page load
 (function checkAuth() {
@@ -40,6 +41,11 @@ async function handleAuth(event) {
             // Store authentication and role in session
             sessionStorage.setItem(AUTH_SESSION_KEY, 'true');
             sessionStorage.setItem(AUTH_ROLE_KEY, result.role);
+
+            // Store admin password for use in privileged operations
+            if (result.role === 'admin') {
+                sessionStorage.setItem(AUTH_PASSWORD_KEY, password);
+            }
 
             // Animate transition
             const overlay = document.getElementById('auth-overlay');
@@ -84,6 +90,7 @@ async function handleAuth(event) {
 window.logout = function () {
     sessionStorage.removeItem(AUTH_SESSION_KEY);
     sessionStorage.removeItem(AUTH_ROLE_KEY);
+    sessionStorage.removeItem(AUTH_PASSWORD_KEY);
     window.location.reload();
 }
 

@@ -12,6 +12,15 @@ window.showLogsView = async function() {
         return;
     }
 
+    const adminPassword = sessionStorage.getItem('ieee_presence_password');
+    if (!adminPassword) {
+        showToast('Please log in again to access logs', 'error');
+        setTimeout(() => {
+            window.logout();
+        }, 2000);
+        return;
+    }
+
     dashboard.style.display = 'none';
     logsView.style.display = 'block';
 
@@ -32,7 +41,7 @@ async function fetchLogs() {
     logsContent.innerHTML = '<div class="loading-state">Loading logs...</div>';
 
     try {
-        const adminPassword = window.userRole === 'admin' ? process.env.ADMIN_PASSWORD : '';
+        const adminPassword = sessionStorage.getItem('ieee_presence_password') || '';
         allLogs = await window.convexClient.query("logs:getAllStatusLogs", { adminPassword });
         renderCurrentView();
     } catch (error) {
