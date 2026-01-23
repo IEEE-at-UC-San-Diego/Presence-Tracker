@@ -35,6 +35,7 @@ window.showLogsView = async function() {
 
     await fetchLogs();
     setupEventListeners();
+    switchTab('by-person');
 }
 
 window.hideLogsView = function() {
