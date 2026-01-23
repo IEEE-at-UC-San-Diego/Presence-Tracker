@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-Bluetooth Agent for IEEE Presence Tracker
+Bluetooth Agent for Presence Tracker
 
 This script runs a persistent Bluetooth agent that automatically accepts
 pairing requests without requiring a PIN. It uses D-Bus to register as
@@ -333,7 +333,7 @@ def main():
     """Main entry point for the Bluetooth agent."""
     global mainloop
     
-    logger.info("Starting IEEE Presence Tracker Bluetooth Agent")
+    logger.info("Starting Presence Tracker Bluetooth Agent")
     
     # Initialize D-Bus main loop
     dbus.mainloop.glib.DBusGMainLoop(set_as_default=True)

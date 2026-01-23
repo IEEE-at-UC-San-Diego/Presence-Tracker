@@ -4,7 +4,7 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>IEEE Presence Tracker</title>
+    <title>Presence Tracker</title>
     <link rel="stylesheet" href="./style.css">
     <link
         href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=Fira+Code:wght@400;500&display=swap"
@@ -24,7 +24,7 @@
             <div class="auth-header">
                 <div class="auth-logo">
                     <div class="auth-logo-bar"></div>
-                    <h1>IEEE Presence Tracker</h1>
+                    <h1 id="main-title-auth">Presence Tracker</h1>
                 </div>
                 <p class="auth-subtitle">Access Restricted</p>
             </div>
@@ -42,7 +42,7 @@
     <div class="app-container" id="main-app" style="display: none;">
         <header class="main-header">
             <div class="logo">
-                <h1>IEEE Presence Tracker</h1>
+                <h1 id="main-title">Presence Tracker</h1>
             </div>
             <div class="header-actions" style="display: flex; gap: 0.75rem; align-items: center;">
                 <button class="btn btn-secondary" onclick="logout()">
@@ -58,12 +58,12 @@
             <!-- Active Residents Section -->
             <section class="section residents-section">
                 <div class="section-header">
-                    <h2>Active IEEE Members</h2>
+                    <h2 id="members-title">Active Members</h2>
                     <span class="count-badge" id="residents-count">0</span>
                 </div>
                 <div class="grid-container" id="residents-grid">
                     <!-- Cards injected by JS -->
-                    <div class="loading-state" id="loading-members">Loading IEEE Members ...</div>
+                    <div class="loading-state" id="loading-members">Loading Members ...</div>
                 </div>
             </section>
 

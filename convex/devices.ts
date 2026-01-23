@@ -8,7 +8,7 @@ export const getOrganizationName = query({
   args: {},
   handler: async (ctx) => {
     // @ts-ignore - process.env is available in Convex functions
-    return process.env.ORGANIZATION_NAME || "IEEE";
+    return process.env.ORGANIZATION_NAME || "Presence Tracker";
   },
 });
 

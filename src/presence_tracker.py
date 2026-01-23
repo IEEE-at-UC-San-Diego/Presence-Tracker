@@ -567,7 +567,7 @@ def run_presence_tracker() -> None:
     connection status and updating Convex as needed. Attendance is only
     logged when device status actually changes (deduplication).
     """
-    logger.info("Starting IEEE Presence Tracker")
+    logger.info("Starting Presence Tracker")
     logger.info(f"Polling interval: {POLLING_INTERVAL} seconds")
     logger.info(f"Grace period for new devices: {GRACE_PERIOD_SECONDS} seconds")
     logger.info(f"Presence TTL: {PRESENT_TTL_SECONDS} seconds")

@@ -19,7 +19,7 @@ const convexClient = window.convexClient;
 // State
 let selectedMacForRegistration = null;
 let subscriptionInitialized = false;
-let organizationName = "IEEE";
+let organizationName = "Presence Tracker"; // Changed from IEEE
 
 document.addEventListener('DOMContentLoaded', () => {
     // Fetch organization name early for UI updates
@@ -46,7 +46,7 @@ async function fetchAndSetOrganizationName() {
     }
     try {
         const orgName = await convexClient.query("devices:getOrganizationName");
-        organizationName = orgName || "IEEE";
+        organizationName = orgName || "Presence Tracker";
         updateOrganizationNameInUI();
     } catch (error) {
         console.error('Failed to fetch organization name:', error);
@@ -57,22 +57,26 @@ function updateOrganizationNameInUI() {
     // Update page title
     document.title = `${organizationName} Presence Tracker`;
 
-    // Update header logo h1
-    const headerTitle = document.querySelector('.main-header .logo h1');
-    if (headerTitle) {
-        headerTitle.textContent = `${organizationName} Presence Tracker`;
+    // Update main header h1 (if custom org name is set)
+    if (organizationName !== 'Presence Tracker') {
+        const mainTitle = document.getElementById('main-title');
+        if (mainTitle) {
+            mainTitle.textContent = `${organizationName} Presence Tracker`;
+        }
     }
 
-    // Update auth overlay header h1
-    const authTitle = document.querySelector('.auth-header h1');
-    if (authTitle) {
-        authTitle.textContent = `${organizationName} Presence Tracker`;
+    // Update auth overlay header h1 (if custom org name is set)
+    if (organizationName !== 'Presence Tracker') {
+        const authTitle = document.getElementById('main-title-auth');
+        if (authTitle) {
+            authTitle.textContent = `${organizationName} Presence Tracker`;
+        }
     }
 
     // Update section header h2
-    const sectionHeader = document.querySelector('.residents-section h2');
-    if (sectionHeader) {
-        sectionHeader.textContent = `Active ${organizationName} Members`;
+    const membersTitle = document.getElementById('members-title');
+    if (membersTitle) {
+        membersTitle.textContent = `${organizationName} Members`;
     }
 
     // Update loading state text
@@ -85,8 +89,8 @@ function updateOrganizationNameInUI() {
     const emptyStates = document.querySelectorAll('.empty-state');
     emptyStates.forEach(el => {
         const text = el.textContent;
-        if (text.includes('IEEE members')) {
-            el.textContent = text.replace('IEEE members', `${organizationName} members`);
+        if (text.includes('members')) {
+            el.textContent = text.replace('members', `${organizationName} members`);
         }
     });
 }

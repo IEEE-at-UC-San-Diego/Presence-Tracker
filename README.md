@@ -1,4 +1,4 @@
-# IEEE Presence Tracker
+# Presence Tracker
 
 Bluetooth-based presence detection system using Convex backend, designed for Raspberry Pi.
 
@@ -67,7 +67,7 @@ This system is designed primarily for **Raspberry Pi deployment** with Bluetooth
 Run the automated setup script on your Raspberry Pi:
 
 ```bash
-cd "/home/ieee/Desktop/IEEE Presence Tracker"
+cd "/home/user/Desktop/Presence Tracker"
 ./setup.sh
 ```
 
@@ -79,12 +79,21 @@ The script will display an interactive menu with options:
 5. **Make Bluetooth Discoverable** - Configure Bluetooth for discoverable mode
 
 The script handles:
+- Installing Node.js/npm (latest LTS)
 - Installing UV and Bun package managers
 - Installing BlueZ and Bluetooth tools
 - Installing Python and JavaScript dependencies
 - Configuring Bluetooth permissions and discoverability
 - Installing and configuring systemd services
 - Deploying to Convex backend
+- Persisting configuration to `setup.config` and `.env`
+
+**Configuration Persistence:**
+The setup script automatically saves your settings to:
+- `setup.config` - Stores BLUETOOTH_NAME and DEPLOYMENT_MODE for future runs
+- `.env` - Updates with BLUETOOTH_NAME and DEPLOYMENT_MODE variables
+
+Subsequent runs will recall saved configuration.
 
 ### Manual Setup
 
@@ -162,7 +171,7 @@ trust XX:XX:XX:XX:XX:XX
 exit
 ```
 
-Your Pi will appear as **"IEEE Knock Knock"** in Bluetooth scans.
+Your Pi will appear as **"Presence Tracker"** in Bluetooth scans.
 
 #### Step 7: Register Devices in Convex
 
@@ -212,7 +221,7 @@ cp .env.example .env
 | Variable | Description | Example |
 |----------|-------------|---------|
 | `CONVEX_DEPLOYMENT_URL` | Your Convex backend deployment URL (required) | `https://chatty-akita-508.convex.cloud` |
-| `ORGANIZATION_NAME` | Display name for your organization | `IEEE` |
+| `ORGANIZATION_NAME` | Display name for your organization (e.g., "My Organization") | - |
 
 ### Presence Tracking Configuration
 
@@ -244,7 +253,7 @@ cp .env.example .env
 CONVEX_DEPLOYMENT_URL=https://your-convex-deployment.convex.cloud
 
 # Organization Name
-ORGANIZATION_NAME=IEEE
+ORGANIZATION_NAME=Your Organization Name
 
 # Presence Tracking
 PRESENT_TTL_SECONDS=120
@@ -408,7 +417,7 @@ sudo systemctl start bluetooth-discoverable.service  # Start discoverable mode
 
 1. Open Bluetooth settings on your phone
 2. Scan for devices
-3. Find "IEEE Knock Knock" 
+3. Find "Presence Tracker" 
 4. Tap to pair (no PIN required)
 
 If the Pi is not appearing as discoverable, run:
@@ -595,6 +604,52 @@ uv run src/presence_tracker.py
 - Disable full probing if not needed: `FULL_PROBE_ENABLED=false`
 - Check for Bluetooth adapter issues
 
+### Setup Issues
+
+#### Bun Command Not Found After Setup Script
+If `bun` or `bunx` commands are not available after running `setup.sh`:
+
+```bash
+# Source your bashrc to load bun in the current session
+source ~/.bashrc
+
+# Verify bun is installed
+bun --version
+```
+
+This can happen because bash needs to be re-sourced afterbun is installed. The setup script attempts to handle this automatically, but if it doesn't work, you can manually source your bashrc.
+
+#### Setup Script Fails at Convex Deployment
+If the setup script fails during the Convex deployment, you can manually deploy later:
+
+```bash
+# Source bashrc first
+source ~/.bashrc
+
+# Initialize Convex deployment
+bunx convex dev
+
+# Deploy to Convex
+bunx convex deploy
+```
+
+The setup script now automatically runs `bunx convex dev` before deploying to ensure the deployment is properly initialized.
+
+#### Configuration Not Persisting
+If `setup.config` is not being created or settings aren't saving:
+
+```bash
+# Check if setup.config exists
+ls -la setup.config
+
+# View saved configuration
+cat setup.config
+
+# Manually run setup configuration option
+./setup.sh
+# Select option 2) Update Config
+```
+
 ## Project Structure
 
 ```
@@ -631,8 +686,13 @@ uv run src/presence_tracker.py
 ├── docker-compose.yml                # Web dashboard container orchestration
 ├── convex.json                       # Convex project configuration
 ├── setup.sh                          # Interactive setup script
+├── setup.config                      # Setup script configuration (auto-generated)
 └── .env.example                      # Environment variable template
 ```
+
+**Additional Files Created During Setup:**
+- `.env` - Environment configuration (created from .env.example)
+- `setup.config` - Persists setup script settings (BLUETOOTH_NAME, DEPLOYMENT_MODE)
 
 ## Systemd Services
 
