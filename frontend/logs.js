@@ -390,7 +390,7 @@ window.exportToCSV = function() {
         }
         logsToExport = allLogs.filter(log => log.userName === selectedPerson);
         filenamePrefix = `logs-${encodeURIComponent(selectedPerson)}`;
-    } else {
+    } else if (currentView === 'by-date') {
         if (!selectedDate) {
             showToast('Please select a date to export', 'error');
             return;
@@ -404,6 +404,9 @@ window.exportToCSV = function() {
             return logDate >= startDate && logDate <= endDate;
         });
         filenamePrefix = `logs-${selectedDate}`;
+    } else if (currentView === 'all') {
+        logsToExport = [...allLogs];
+        filenamePrefix = 'logs-all';
     }
 
     if (logsToExport.length === 0) {
