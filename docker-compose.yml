@@ -3,7 +3,7 @@ services:
     build:
       context: ./frontend
     ports:
-      - "3000:80"
+      - "3132:80"
     environment:
       - CONVEX_URL_MODE=${CONVEX_URL_MODE:-convex}
       - CONVEX_DEPLOYMENT_URL=${CONVEX_DEPLOYMENT_URL}
