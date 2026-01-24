@@ -1114,8 +1114,10 @@ prompt_bluetooth_name() {
     echo "=========================================="
     echo "Bluetooth Configuration"
     echo "=========================================="
-    read -p "Enter Bluetooth device name (default: Presence Tracker): " INPUT_NAME
-    BLUETOOTH_NAME=${INPUT_NAME:-"Presence Tracker"}
+    # Use saved BLUETOOTH_NAME as default, fallback to "Presence Tracker"
+    local default_name="${BLUETOOTH_NAME:-Presence Tracker}"
+    read -p "Enter Bluetooth device name (default: $default_name): " INPUT_NAME
+    BLUETOOTH_NAME=${INPUT_NAME:-"$default_name"}
     log_info "Bluetooth name set to: $BLUETOOTH_NAME"
     
     # Set persistent Bluetooth name via /etc/machine-info
