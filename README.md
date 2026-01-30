@@ -410,6 +410,8 @@ The web dashboard uses password authentication to protect access. Configure thes
 | `PRESENT_TTL_SECONDS` | How long a device is considered present after last seen (seconds) | `120` |
 | `NEWLY_REGISTERED_GRACE_PERIOD` | Grace period for newly registered devices to enter polling cycle (seconds) | `120` |
 | `GRACE_PERIOD_SECONDS` | Time new devices have to be registered before auto-deletion (seconds) | `300` |
+| `ABSENCE_HYSTERESIS_CYCLES` | Number of consecutive missing cycles before marking a device absent | `2` |
+| `ALL_SILENT_ABSENCE_CYCLES` | Allow absence flips after this many zero-signal cycles (0 = always require signal) | `2` |
 
 ### Probing Strategy
 
@@ -439,6 +441,8 @@ ORGANIZATION_NAME=Your Organization Name
 PRESENT_TTL_SECONDS=120
 NEWLY_REGISTERED_GRACE_PERIOD=120
 GRACE_PERIOD_SECONDS=300
+ABSENCE_HYSTERESIS_CYCLES=2
+ALL_SILENT_ABSENCE_CYCLES=2
 
 # Probing Strategy
 FULL_PROBE_ENABLED=true

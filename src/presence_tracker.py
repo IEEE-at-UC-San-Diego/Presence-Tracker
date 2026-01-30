@@ -59,6 +59,17 @@ GRACE_PERIOD_SECONDS = int(os.getenv("GRACE_PERIOD_SECONDS", "300"))
 # Presence TTL for recently seen devices (seconds)
 PRESENT_TTL_SECONDS = int(os.getenv("PRESENT_TTL_SECONDS", "120"))
 
+# Require at least one positive presence signal per cycle before marking any device absent
+REQUIRE_PRESENCE_SIGNAL_FOR_ABSENCE = os.getenv(
+    "REQUIRE_PRESENCE_SIGNAL_FOR_ABSENCE", "true"
+).lower() in ("1", "true", "yes")
+
+# Require N consecutive absence detections before flipping a device to absent
+ABSENCE_HYSTERESIS_CYCLES = max(1, int(os.getenv("ABSENCE_HYSTERESIS_CYCLES", "2")))
+
+# Allow absence flips after this many consecutive "all silent" cycles (0 disables the guard)
+ALL_SILENT_ABSENCE_CYCLES = max(0, int(os.getenv("ALL_SILENT_ABSENCE_CYCLES", "2")))
+
 # Grace period for newly registered devices to enter polling cycle (seconds)
 # Ensures first-time registered devices are immediately tracked for connect/disconnect
 NEWLY_REGISTERED_GRACE_PERIOD = int(os.getenv("NEWLY_REGISTERED_GRACE_PERIOD", "120"))
@@ -96,6 +107,15 @@ device_previous_status: dict[str, str] = {}
 
 # Track devices seen recently to smooth presence when disconnecting after checks
 recently_seen_devices: dict[str, float] = {}
+
+# Track the last time we recorded any positive signal per device (not pruned with TTL)
+last_presence_signal: dict[str, float] = {}
+
+# Track consecutive cycles where a device was missing from the presence set
+absence_miss_streaks: dict[str, int] = {}
+
+# Track consecutive polling cycles where no presence signals were observed
+silent_cycle_streak = 0
 
 # Track when the last full probe ran
 last_full_probe_time = 0.0
@@ -446,9 +466,29 @@ def check_and_update_devices() -> None:
         last_full_probe_time = now
         reconnected_success = {mac for mac, success in reconnect_results.items() if success}
 
+    global silent_cycle_streak
+
+    presence_signals_this_cycle = connected_set | reconnected_success
+
+    if presence_signals_this_cycle:
+        if silent_cycle_streak:
+            logger.debug(
+                "Resetting silent cycle streak after detecting %d presence signal(s)",
+                len(presence_signals_this_cycle),
+            )
+        silent_cycle_streak = 0
+    else:
+        silent_cycle_streak += 1
+        logger.debug(
+            "No presence signals detected this cycle (streak %d/%s)",
+            silent_cycle_streak,
+            "∞" if ALL_SILENT_ABSENCE_CYCLES == 0 else ALL_SILENT_ABSENCE_CYCLES,
+        )
+
     # Track recently seen devices (connected or successfully pinged)
-    for mac in connected_set | reconnected_success:
+    for mac in presence_signals_this_cycle:
         recently_seen_devices[mac] = now
+        last_presence_signal[mac] = now
 
     # Add newly registered devices to present_set to ensure they enter polling cycle immediately
     # This fixes the bug where first-time registered devices are not properly tracked
@@ -465,6 +505,7 @@ def check_and_update_devices() -> None:
             status == "present" and
             now - (connected_since / 1000) <= NEWLY_REGISTERED_GRACE_PERIOD):
             recently_seen_devices[mac_address] = now
+            last_presence_signal[mac_address] = now
             logger.debug(
                 f"Added newly registered device to present_set: {mac_address} "
                 f"(connectedSince: {connected_since / 1000:.1f}s ago)"
@@ -523,7 +564,42 @@ def check_and_update_devices() -> None:
             display_name = f"[pending] {mac_address}"
 
         is_present = mac_address in present_set
+        held_present_reasons: list[str] = []
+
+        if is_present:
+            absence_miss_streaks.pop(mac_address, None)
+        else:
+            streak = absence_miss_streaks.get(mac_address, 0) + 1
+            absence_miss_streaks[mac_address] = streak
+
+            if streak < ABSENCE_HYSTERESIS_CYCLES:
+                held_present_reasons.append(
+                    f"absence streak {streak}/{ABSENCE_HYSTERESIS_CYCLES}"
+                )
+
+            silent_grace_active = (
+                REQUIRE_PRESENCE_SIGNAL_FOR_ABSENCE
+                and not presence_signals_this_cycle
+                and (ALL_SILENT_ABSENCE_CYCLES == 0 or silent_cycle_streak <= ALL_SILENT_ABSENCE_CYCLES)
+            )
+
+            if silent_grace_active:
+                held_present_reasons.append(
+                    "no presence signals detected this cycle (within silent timeout)"
+                )
+
+            if held_present_reasons:
+                is_present = True
+
         new_status = "present" if is_present else "absent"
+
+        if held_present_reasons and new_status == "present" and current_status != "absent":
+            logger.debug(
+                "Holding %s (%s) as present due to %s",
+                display_name,
+                mac_address,
+                "; ".join(held_present_reasons),
+            )
 
 
 
