@@ -57,7 +57,7 @@ POLLING_INTERVAL = 5
 GRACE_PERIOD_SECONDS = int(os.getenv("GRACE_PERIOD_SECONDS", "300"))
 
 # Presence TTL for recently seen devices (seconds)
-PRESENT_TTL_SECONDS = int(os.getenv("PRESENT_TTL_SECONDS", "120"))
+PRESENT_TTL_SECONDS = int(os.getenv("PRESENT_TTL_SECONDS", "30"))
 
 # Require at least one positive presence signal per cycle before marking any device absent
 REQUIRE_PRESENCE_SIGNAL_FOR_ABSENCE = os.getenv(
@@ -614,7 +614,7 @@ def check_and_update_devices() -> None:
                 f"Status changed for {display_name} ({mac_address}): "
                 f"{current_status} -> {new_status}"
             )
-            if update_device_status(mac_address, is_present, current_status):
+            if update_device_status(mac_address, final_is_present, current_status):
                 updated_count += 1
         else:
             logger.debug(f"No status change for {display_name} ({mac_address}): {current_status}")
