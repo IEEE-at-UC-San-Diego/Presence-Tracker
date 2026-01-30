@@ -7,6 +7,7 @@ import time
 from threading import Lock
 from datetime import datetime, timedelta
 import os
+from concurrent.futures import ThreadPoolExecutor, as_completed
 
 # Ensure logs directory exists
 os.makedirs("logs", exist_ok=True)
@@ -611,9 +612,57 @@ def _pick_reconnect_candidates(candidates: set[str], max_count: int) -> list[str
     return sorted(candidates, key=last_attempt)[:max_count]
 
 
+def _get_registered_convex_devices() -> set[str]:
+    """Fetch the set of Convex-registered device MAC addresses."""
+    try:
+        from presence_tracker import get_known_devices  # type: ignore
+    except Exception as e:
+        logger.error(f"Convex registration prefilter unavailable (import error): {e}")
+        return set()
+
+    try:
+        devices = get_known_devices()
+    except Exception as e:
+        logger.error(f"Convex registration prefilter failed when fetching devices: {e}")
+        return set()
+
+    registered = {
+        device.get("macAddress")
+        for device in devices
+        if device.get("macAddress") and not device.get("pendingRegistration")
+    }
+
+    return set(registered)
+
+
+def _probe_single_device(mac_address: str, disconnect_after: bool) -> tuple[str, bool]:
+    """
+    Helper function to probe a single device.
+    
+    Args:
+        mac_address: The MAC address to probe.
+        disconnect_after: Whether to disconnect after a successful connect.
+        
+    Returns:
+        Tuple of (mac_address, success).
+    """
+    try:
+        logger.info(f"Probing device: {mac_address}")
+        success = connect_device(mac_address)
+        if success and disconnect_after:
+            disconnect_device(mac_address)
+        return (mac_address, success)
+    except Exception as e:
+        logger.error(f"Error probing device {mac_address}: {e}")
+        return (mac_address, False)
+
+
 def probe_devices(mac_addresses: list[str], disconnect_after: bool = True) -> dict[str, bool]:
     """
     Probe devices by attempting a connect and optional disconnect.
+
+    Uses concurrent processing to connect to multiple devices simultaneously,
+    with each connection having its own timeout.
 
     Args:
         mac_addresses: List of MAC addresses to probe.
@@ -623,12 +672,26 @@ def probe_devices(mac_addresses: list[str], disconnect_after: bool = True) -> di
         Dictionary mapping MAC address to connection result.
     """
     results: dict[str, bool] = {}
-    for mac_address in mac_addresses:
-        logger.info(f"Probing device: {mac_address}")
-        success = connect_device(mac_address)
-        results[mac_address] = success
-        if success and disconnect_after:
-            disconnect_device(mac_address)
+    
+    if not mac_addresses:
+        return results
+    
+    # Determine concurrency limit - use MAX_RECONNECT_PER_CYCLE or reasonable default
+    max_workers = MAX_RECONNECT_PER_CYCLE if MAX_RECONNECT_PER_CYCLE > 0 else min(len(mac_addresses), 4)
+    
+    # Use ThreadPoolExecutor for concurrent connection attempts
+    with ThreadPoolExecutor(max_workers=max_workers) as executor:
+        # Submit all connection tasks
+        future_to_mac = {
+            executor.submit(_probe_single_device, mac_address, disconnect_after): mac_address
+            for mac_address in mac_addresses
+        }
+        
+        # Collect results as they complete
+        for future in as_completed(future_to_mac):
+            mac_address, success = future.result()
+            results[mac_address] = success
+    
     return results
 
 
@@ -703,6 +766,49 @@ def scan_for_devices_in_range() -> set[str]:
     return devices_in_range
 
 
+def _reconnect_single_device(
+    mac_address: str, disconnect_after_success: bool
+) -> tuple[str, bool] | None:
+    """
+    Helper function to reconnect a single device.
+    
+    This function handles the cooldown check, connection attempt recording,
+    and actual connection/disconnection logic for a single device.
+    
+    Args:
+        mac_address: The MAC address to reconnect.
+        disconnect_after_success: Whether to disconnect after a successful connection.
+        
+    Returns:
+        Tuple of (mac_address, success) if a connection attempt was made, otherwise None.
+    """
+    # Check cooldown - this is thread-safe due to the lock in _can_attempt_reconnection
+    if not _can_attempt_reconnection(mac_address):
+        logger.debug(f"Skipping {mac_address} - in cooldown")
+        return None
+
+    # Record attempt before trying - thread-safe due to the lock in _record_connection_attempt
+    _record_connection_attempt(mac_address)
+
+    try:
+        logger.info(f"Attempting auto-reconnection to: {mac_address}")
+
+        # Attempt connection
+        success = connect_device(mac_address)
+
+        if success:
+            logger.info(f"✓ Successfully auto-reconnected to: {mac_address}")
+            if disconnect_after_success:
+                disconnect_device(mac_address)
+        else:
+            logger.warning(f"✗ Failed to auto-reconnect to: {mac_address}")
+
+        return (mac_address, success)
+    except Exception as e:
+        logger.error(f"Error during auto-reconnection to {mac_address}: {e}")
+        return (mac_address, False)
+
+
 def auto_reconnect_paired_devices(
     whitelist_macs: set[str] | None = None,
     disconnect_after_success: bool | None = None,
@@ -713,9 +819,12 @@ def auto_reconnect_paired_devices(
     This function:
     1. Gets the list of paired devices
     2. Scans for devices currently in range
-    3. For paired devices in range that are not connected, attempts reconnection
+    3. For paired devices in range that are not connected, attempts reconnection concurrently
     4. Respects cooldown periods to avoid spamming connection attempts
     5. Tracks connection attempts and logs success/failure
+
+    Uses concurrent processing to connect to multiple devices simultaneously,
+    with MAX_RECONNECT_PER_CYCLE controlling the concurrency limit.
 
     Args:
         whitelist_macs: Optional set of MAC addresses to limit reconnection attempts to.
@@ -768,38 +877,57 @@ def auto_reconnect_paired_devices(
             logger.info("No paired devices in range that need connection")
             return results
 
-        if MAX_RECONNECT_PER_CYCLE > 0 and len(devices_to_connect) > MAX_RECONNECT_PER_CYCLE:
-            logger.info(
-                f"Limiting reconnect attempts: {len(devices_to_connect)} -> {MAX_RECONNECT_PER_CYCLE}"
+        registered_convex_devices = _get_registered_convex_devices()
+        if not registered_convex_devices:
+            logger.warning(
+                "Convex registration prefilter unavailable; skipping auto-reconnection cycle"
             )
-            devices_to_connect = set(
-                _pick_reconnect_candidates(devices_to_connect, MAX_RECONNECT_PER_CYCLE)
-            )
+            return results
 
-        logger.info(f"Attempting to connect to {len(devices_to_connect)} device(s)")
+        registered_candidates = devices_to_connect & registered_convex_devices
+        if not registered_candidates:
+            logger.info("No registered Convex devices in range that need connection")
+            return results
 
-        # Attempt connection to each device
-        for mac_address in devices_to_connect:
-            # Check cooldown
-            if not _can_attempt_reconnection(mac_address):
-                logger.debug(f"Skipping {mac_address} - in cooldown")
-                continue
+        max_candidates = MAX_RECONNECT_PER_CYCLE if MAX_RECONNECT_PER_CYCLE > 0 else 0
+        ordered_candidates = _pick_reconnect_candidates(registered_candidates, max_candidates)
 
-            # Record attempt before trying
-            _record_connection_attempt(mac_address)
+        if not ordered_candidates:
+            logger.info("No devices available for auto-reconnection after Convex filtering")
+            return results
 
-            logger.info(f"Attempting auto-reconnection to: {mac_address}")
+        logger.info(f"Attempting to connect to {len(ordered_candidates)} device(s)")
 
-            # Attempt connection
-            success = connect_device(mac_address)
-            results[mac_address] = success
+        if MAX_RECONNECT_PER_CYCLE > 0:
+            max_workers = min(len(ordered_candidates), MAX_RECONNECT_PER_CYCLE)
+        else:
+            max_workers = min(len(ordered_candidates), 4)
+        max_workers = max(1, max_workers)
 
-            if success:
-                logger.info(f"✓ Successfully auto-reconnected to: {mac_address}")
-                if disconnect_after_success:
-                    disconnect_device(mac_address)
-            else:
-                logger.warning(f"✗ Failed to auto-reconnect to: {mac_address}")
+        # Use ThreadPoolExecutor for concurrent connection attempts
+        with ThreadPoolExecutor(max_workers=max_workers) as executor:
+            # Submit all connection tasks
+            future_to_mac = {
+                executor.submit(
+                    _reconnect_single_device, mac_address, disconnect_after_success
+                ): mac_address
+                for mac_address in ordered_candidates
+            }
+            
+            # Collect results as they complete
+            for future in as_completed(future_to_mac):
+                mac_address = future_to_mac[future]
+                try:
+                    attempt = future.result()
+                    if attempt is None:
+                        continue
+                    _, success = attempt
+                except Exception as e:
+                    logger.error(
+                        f"Unhandled error during auto-reconnection to {mac_address}: {e}"
+                    )
+                    success = False
+                results[mac_address] = success
 
         logger.info("=== Auto-reconnection cycle complete ===")
         return results
