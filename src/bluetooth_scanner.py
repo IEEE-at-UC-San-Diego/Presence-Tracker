@@ -34,6 +34,14 @@ _connection_state_lock = Lock()
 # Cooldown period between connection attempts for the same device (seconds)
 RECONNECT_COOLDOWN = 30
 
+# L2PING configuration for passive detection
+L2PING_TIMEOUT_SECONDS = int(os.getenv("L2PING_TIMEOUT_SECONDS", "2"))
+L2PING_COUNT = int(os.getenv("L2PING_COUNT", "1"))
+L2PING_CONCURRENT_WORKERS = int(os.getenv("L2PING_CONCURRENT_WORKERS", "10"))
+
+# Name request timeout for fallback detection
+NAME_REQUEST_TIMEOUT_SECONDS = int(os.getenv("NAME_REQUEST_TIMEOUT_SECONDS", "3"))
+
 # How long to consider a device "recently attempted" (seconds)
 RECENT_ATTEMPT_WINDOW = 60
 
@@ -129,6 +137,238 @@ logger.info(
     PROBE_CONCURRENT_CONNECTIONS,
     DEVICE_INFO_CACHE_SECONDS,
 )
+
+
+def l2ping_device(mac_address: str, count: int = None, timeout: int = None) -> bool:
+    """
+    Ping a Bluetooth device using L2CAP without establishing a full connection.
+    This is a passive detection method that works for paired devices.
+    
+    Args:
+        mac_address: The MAC address of the device to ping
+        count: Number of ping packets to send (default: L2PING_COUNT)
+        timeout: Timeout in seconds for each ping (default: L2PING_TIMEOUT_SECONDS)
+    
+    Returns:
+        True if device responds (is in range), False otherwise
+    """
+    if not _is_valid_mac(mac_address):
+        logger.debug(f"Invalid MAC address for l2ping: {mac_address}")
+        return False
+    
+    if count is None:
+        count = L2PING_COUNT
+    if timeout is None:
+        timeout = L2PING_TIMEOUT_SECONDS
+    
+    try:
+        result = subprocess.run(
+            ["l2ping", "-c", str(count), "-t", str(timeout), mac_address],
+            capture_output=True,
+            text=True,
+            timeout=timeout + 2,  # Allow extra time for process overhead
+        )
+        # l2ping returns 0 if device responds
+        success = result.returncode == 0 and "bytes from" in result.stdout.lower()
+        if success:
+            logger.debug(f"l2ping success for {mac_address}")
+        else:
+            logger.debug(f"l2ping failed for {mac_address}: {result.stderr.strip() or result.stdout.strip()}")
+        return success
+    except subprocess.TimeoutExpired:
+        logger.debug(f"l2ping timeout for {mac_address}")
+        return False
+    except FileNotFoundError:
+        logger.error("l2ping not found. Install bluez package.")
+        return False
+    except Exception as e:
+        logger.debug(f"l2ping error for {mac_address}: {e}")
+        return False
+
+
+def _l2ping_single(mac_address: str) -> tuple[str, bool]:
+    """Helper for concurrent l2ping."""
+    return (mac_address, l2ping_device(mac_address))
+
+
+def batch_l2ping_devices(mac_addresses: list[str]) -> dict[str, bool]:
+    """
+    Ping multiple devices concurrently using l2ping.
+    
+    Args:
+        mac_addresses: List of MAC addresses to ping
+    
+    Returns:
+        Dictionary mapping MAC address to ping result (True=responded, False=no response)
+    """
+    results: dict[str, bool] = {}
+    
+    if not mac_addresses:
+        return results
+    
+    max_workers = min(len(mac_addresses), L2PING_CONCURRENT_WORKERS)
+    start = time.perf_counter()
+    
+    with ThreadPoolExecutor(max_workers=max_workers) as executor:
+        future_to_mac = {
+            executor.submit(_l2ping_single, mac): mac
+            for mac in mac_addresses
+        }
+        
+        for future in as_completed(future_to_mac):
+            mac = future_to_mac[future]
+            try:
+                _, success = future.result()
+                results[mac] = success
+            except Exception as e:
+                logger.error(f"l2ping task failed for {mac}: {e}")
+                results[mac] = False
+    
+    duration = time.perf_counter() - start
+    successes = sum(1 for s in results.values() if s)
+    logger.info(
+        f"l2ping batch complete: {successes}/{len(results)} responded in {duration:.2f}s"
+    )
+    return results
+
+
+def name_request_device(mac_address: str, timeout: int = None) -> bool:
+    """
+    Request device name without establishing a full connection.
+    If the device responds with its name, it's in range.
+    
+    Args:
+        mac_address: The MAC address of the device
+        timeout: Timeout in seconds (default: NAME_REQUEST_TIMEOUT_SECONDS)
+    
+    Returns:
+        True if device responds with name (is in range), False otherwise
+    """
+    if not _is_valid_mac(mac_address):
+        logger.debug(f"Invalid MAC address for name request: {mac_address}")
+        return False
+    
+    if timeout is None:
+        timeout = NAME_REQUEST_TIMEOUT_SECONDS
+    
+    try:
+        result = subprocess.run(
+            ["hcitool", "name", mac_address],
+            capture_output=True,
+            text=True,
+            timeout=timeout,
+        )
+        # If we get a name back (non-empty stdout), device is in range
+        name = result.stdout.strip()
+        if name:
+            logger.debug(f"Name request success for {mac_address}: {name}")
+            return True
+        logger.debug(f"Name request failed for {mac_address}: no name returned")
+        return False
+    except subprocess.TimeoutExpired:
+        logger.debug(f"Name request timeout for {mac_address}")
+        return False
+    except FileNotFoundError:
+        logger.error("hcitool not found. Install bluez package.")
+        return False
+    except Exception as e:
+        logger.debug(f"Name request error for {mac_address}: {e}")
+        return False
+
+
+def _name_request_single(mac_address: str) -> tuple[str, bool]:
+    """Helper for concurrent name requests."""
+    return (mac_address, name_request_device(mac_address))
+
+
+def batch_name_request_devices(mac_addresses: list[str]) -> dict[str, bool]:
+    """
+    Request names from multiple devices concurrently.
+    
+    Args:
+        mac_addresses: List of MAC addresses to query
+    
+    Returns:
+        Dictionary mapping MAC address to result (True=responded, False=no response)
+    """
+    results: dict[str, bool] = {}
+    
+    if not mac_addresses:
+        return results
+    
+    max_workers = min(len(mac_addresses), THREAD_PROBE_WORKERS)
+    start = time.perf_counter()
+    
+    with ThreadPoolExecutor(max_workers=max_workers) as executor:
+        future_to_mac = {
+            executor.submit(_name_request_single, mac): mac
+            for mac in mac_addresses
+        }
+        
+        for future in as_completed(future_to_mac):
+            mac = future_to_mac[future]
+            try:
+                _, success = future.result()
+                results[mac] = success
+            except Exception as e:
+                logger.error(f"Name request task failed for {mac}: {e}")
+                results[mac] = False
+    
+    duration = time.perf_counter() - start
+    successes = sum(1 for s in results.values() if s)
+    logger.debug(
+        f"Name request batch complete: {successes}/{len(results)} responded in {duration:.2f}s"
+    )
+    return results
+
+
+def detect_devices_passive(mac_addresses: list[str]) -> dict[str, tuple[bool, str]]:
+    """
+    Detect devices using passive methods (no full connection required).
+    Uses a tiered approach: l2ping first, then name request for failures.
+    
+    Args:
+        mac_addresses: List of MAC addresses to detect
+    
+    Returns:
+        Dictionary mapping MAC address to (detected, method) tuple.
+        method is one of: 'l2ping', 'name_request', 'none'
+    """
+    results: dict[str, tuple[bool, str]] = {}
+    
+    if not mac_addresses:
+        return results
+    
+    # Phase 1: L2PING all devices (fastest)
+    logger.info(f"Phase 1: L2PING {len(mac_addresses)} device(s)...")
+    l2ping_results = batch_l2ping_devices(mac_addresses)
+    
+    detected_macs: set[str] = set()
+    failed_macs: list[str] = []
+    
+    for mac, success in l2ping_results.items():
+        if success:
+            results[mac] = (True, "l2ping")
+            detected_macs.add(mac)
+        else:
+            failed_macs.append(mac)
+    
+    # Phase 2: Name request for devices that didn't respond to l2ping
+    if failed_macs:
+        logger.info(f"Phase 2: Name request for {len(failed_macs)} device(s)...")
+        name_results = batch_name_request_devices(failed_macs)
+        
+        for mac, success in name_results.items():
+            if success:
+                results[mac] = (True, "name_request")
+                detected_macs.add(mac)
+            else:
+                results[mac] = (False, "none")
+    
+    logger.info(
+        f"Passive detection complete: {len(detected_macs)}/{len(mac_addresses)} detected"
+    )
+    return results
 
 
 def _bluetoothctl_info(mac_address: str) -> Optional[str]:
@@ -780,51 +1020,79 @@ def _probe_single_device(mac_address: str, disconnect_after: bool) -> tuple[str,
         return (mac_address, False)
 
 
-def probe_devices(mac_addresses: list[str], disconnect_after: bool = True) -> dict[str, bool]:
+def probe_devices(mac_addresses: list[str], disconnect_after: bool = True, use_passive_first: bool = True) -> dict[str, bool]:
     """
-    Probe devices by attempting a connect and optional disconnect.
-
-    Uses concurrent processing to connect to multiple devices simultaneously,
-    with each connection having its own timeout.
+    Probe devices to detect presence.
+    
+    Uses a tiered approach:
+    1. Passive detection (l2ping + name request) - fast, no connection required
+    2. Connection probe (connect + disconnect) - fallback for devices not detected passively
 
     Args:
         mac_addresses: List of MAC addresses to probe.
         disconnect_after: Whether to disconnect after a successful connect.
+        use_passive_first: If True, try passive detection before connection probes.
 
     Returns:
-        Dictionary mapping MAC address to connection result.
+        Dictionary mapping MAC address to detection result.
     """
     results: dict[str, bool] = {}
     
     if not mac_addresses:
         return results
 
-    max_workers = min(len(mac_addresses), PROBE_CONCURRENT_CONNECTIONS)
     start = time.perf_counter()
+    
+    # Phase 1: Passive detection (l2ping + name request)
+    if use_passive_first:
+        passive_results = detect_devices_passive(mac_addresses)
+        
+        devices_needing_probe: list[str] = []
+        for mac, (detected, method) in passive_results.items():
+            if detected:
+                results[mac] = True
+                logger.debug(f"Device {mac} detected via {method}")
+            else:
+                devices_needing_probe.append(mac)
+        
+        # If all devices detected passively, we're done
+        if not devices_needing_probe:
+            duration = time.perf_counter() - start
+            logger.info(
+                f"All {len(results)} device(s) detected passively in {duration:.2f}s"
+            )
+            return results
+        
+        logger.info(
+            f"Passive detection found {len(results)}/{len(mac_addresses)} device(s). "
+            f"Probing {len(devices_needing_probe)} remaining device(s)..."
+        )
+    else:
+        devices_needing_probe = list(mac_addresses)
+    
+    # Phase 2: Connection probe for devices not detected passively
+    if devices_needing_probe:
+        max_workers = min(len(devices_needing_probe), PROBE_CONCURRENT_CONNECTIONS)
 
-    with ThreadPoolExecutor(max_workers=max_workers) as executor:
-        future_to_mac = {
-            executor.submit(_probe_single_device, mac_address, disconnect_after): mac_address
-            for mac_address in mac_addresses
-        }
+        with ThreadPoolExecutor(max_workers=max_workers) as executor:
+            future_to_mac = {
+                executor.submit(_probe_single_device, mac_address, disconnect_after): mac_address
+                for mac_address in devices_needing_probe
+            }
 
-        for future in as_completed(future_to_mac):
-            mac_address = future_to_mac[future]
-            try:
-                mac, success = future.result()
-                results[mac] = success
-            except Exception as exc:
-                logger.error(f"Probe task failed for {mac_address}: {exc}")
-                results[mac_address] = False
+            for future in as_completed(future_to_mac):
+                mac_address = future_to_mac[future]
+                try:
+                    mac, success = future.result()
+                    results[mac] = success
+                except Exception as exc:
+                    logger.error(f"Probe task failed for {mac_address}: {exc}")
+                    results[mac_address] = False
 
     duration = time.perf_counter() - start
     successes = sum(1 for success in results.values() if success)
-    logger.debug(
-        "Probe batch complete -> total=%s success=%s workers=%s duration=%.2fs",
-        len(results),
-        successes,
-        max_workers,
-        duration,
+    logger.info(
+        f"Probe complete: {successes}/{len(results)} detected in {duration:.2f}s"
     )
     return results
 

@@ -57,7 +57,8 @@ POLLING_INTERVAL = 5
 GRACE_PERIOD_SECONDS = int(os.getenv("GRACE_PERIOD_SECONDS", "300"))
 
 # Presence TTL for recently seen devices (seconds)
-PRESENT_TTL_SECONDS = int(os.getenv("PRESENT_TTL_SECONDS", "30"))
+# Increased to 45s to give more grace period with passive detection
+PRESENT_TTL_SECONDS = int(os.getenv("PRESENT_TTL_SECONDS", "45"))
 
 # Require at least one positive presence signal per cycle before marking any device absent
 REQUIRE_PRESENCE_SIGNAL_FOR_ABSENCE = os.getenv(
@@ -125,7 +126,8 @@ last_presence_signal: dict[str, float] = {}
 consecutive_positive_detections: dict[str, int] = {}
 
 # Number of consecutive positive detections required before marking device as present
-POSITIVE_DETECTION_CONFIRMATIONS = max(1, int(os.getenv("POSITIVE_DETECTION_CONFIRMATIONS", "2")))
+# Reduced to 1 since l2ping passive detection is reliable and fast
+POSITIVE_DETECTION_CONFIRMATIONS = max(1, int(os.getenv("POSITIVE_DETECTION_CONFIRMATIONS", "1")))
 
 # Track consecutive cycles where a device was missing from the presence set
 absence_miss_streaks: dict[str, int] = {}
@@ -860,9 +862,10 @@ def run_presence_tracker() -> None:
     logger.info(f"Polling interval: {POLLING_INTERVAL} seconds")
     logger.info(f"Grace period for new devices: {GRACE_PERIOD_SECONDS} seconds")
     logger.info(f"Presence TTL: {PRESENT_TTL_SECONDS} seconds")
-    logger.info(f"Full probe enabled: {FULL_PROBE_ENABLED}")
+    logger.info(f"Full probe enabled: {FULL_PROBE_ENABLED} (uses passive detection: l2ping + name request)")
     logger.info(f"Full probe interval: {FULL_PROBE_INTERVAL_SECONDS} seconds")
     logger.info(f"Full probe disconnect after: {FULL_PROBE_DISCONNECT_AFTER}")
+    logger.info(f"Positive detection confirmations: {POSITIVE_DETECTION_CONFIRMATIONS}")
 
     logger.info(f"Disconnect after cycle: {DISCONNECT_CONNECTED_AFTER_CYCLE}")
     logger.info(f"Convex query timeout: {CONVEX_QUERY_TIMEOUT} seconds")
