@@ -377,6 +377,24 @@ export const getPresentUsers = query({
   },
 });
 
+export const getAbsentUsers = query({
+  args: {},
+  handler: async (ctx) => {
+    const devices = await ctx.db
+      .query("devices")
+      .withIndex("by_status", (q) => q.eq("status", "absent"))
+      .collect();
+
+    return devices
+      .filter((d) => !d.pendingRegistration)
+      .map((d) => ({
+        firstName: d.firstName,
+        lastName: d.lastName,
+        name: d.name,
+      }));
+  },
+});
+
 export const logAttendance = mutation({
   args: {
     userId: v.string(),

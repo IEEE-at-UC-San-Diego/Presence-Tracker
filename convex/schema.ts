@@ -34,6 +34,9 @@ export default defineSchema({
       webhookUrl: v.optional(v.string()),
       botToken: v.optional(v.string()),
       channelId: v.optional(v.string()),
+      displayName: v.optional(v.string()),
+      useEmbeds: v.optional(v.boolean()),
+      showAbsentUsers: v.optional(v.boolean()),
     }),
     isEnabled: v.boolean(),
     // Slack message ts or Discord message ID for persistent message updates

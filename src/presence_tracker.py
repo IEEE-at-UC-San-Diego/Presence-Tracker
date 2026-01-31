@@ -67,7 +67,7 @@ REQUIRE_PRESENCE_SIGNAL_FOR_ABSENCE = os.getenv(
 # Require N consecutive absence detections before flipping a device to absent
 ABSENCE_HYSTERESIS_CYCLES = max(1, int(os.getenv("ABSENCE_HYSTERESIS_CYCLES", "2")))
 
-# Allow absence flips after this many consecutive "all silent" cycles (0 disables the guard)
+# Allow absence flips after this many consecutive "all silent" cycles (0 means don't wait)
 ALL_SILENT_ABSENCE_CYCLES = max(0, int(os.getenv("ALL_SILENT_ABSENCE_CYCLES", "2")))
 
 # Grace period for newly registered devices to enter polling cycle (seconds)
@@ -581,7 +581,7 @@ def check_and_update_devices() -> None:
             silent_grace_active = (
                 REQUIRE_PRESENCE_SIGNAL_FOR_ABSENCE
                 and not presence_signals_this_cycle
-                and (ALL_SILENT_ABSENCE_CYCLES == 0 or silent_cycle_streak <= ALL_SILENT_ABSENCE_CYCLES)
+                and (ALL_SILENT_ABSENCE_CYCLES > 0 and silent_cycle_streak <= ALL_SILENT_ABSENCE_CYCLES)
             )
 
             if silent_grace_active:
