@@ -144,6 +144,8 @@ def l2ping_device(mac_address: str, count: int = None, timeout: int = None) -> b
     Ping a Bluetooth device using L2CAP without establishing a full connection.
     This is a passive detection method that works for paired devices.
     
+    Note: l2ping typically requires root/sudo or CAP_NET_RAW capability.
+    
     Args:
         mac_address: The MAC address of the device to ping
         count: Number of ping packets to send (default: L2PING_COUNT)
@@ -173,7 +175,12 @@ def l2ping_device(mac_address: str, count: int = None, timeout: int = None) -> b
         if success:
             logger.debug(f"l2ping success for {mac_address}")
         else:
-            logger.debug(f"l2ping failed for {mac_address}: {result.stderr.strip() or result.stdout.strip()}")
+            # Check for permission error
+            stderr = result.stderr.strip().lower()
+            if "permission" in stderr or "operation not permitted" in stderr:
+                logger.warning(f"l2ping permission denied for {mac_address} - run with sudo or set CAP_NET_RAW")
+            else:
+                logger.debug(f"l2ping failed for {mac_address}: {result.stderr.strip() or result.stdout.strip()}")
         return success
     except subprocess.TimeoutExpired:
         logger.debug(f"l2ping timeout for {mac_address}")
@@ -1042,6 +1049,7 @@ def probe_devices(mac_addresses: list[str], disconnect_after: bool = True, use_p
         return results
 
     start = time.perf_counter()
+    logger.info(f"probe_devices called with {len(mac_addresses)} device(s), use_passive_first={use_passive_first}")
     
     # Phase 1: Passive detection (l2ping + name request)
     if use_passive_first:
