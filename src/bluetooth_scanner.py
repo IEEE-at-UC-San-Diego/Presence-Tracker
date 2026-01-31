@@ -62,40 +62,18 @@ MAX_RECONNECT_PER_CYCLE = int(os.getenv("MAX_RECONNECT_PER_CYCLE", "4"))
 
 def _device_info_indicates_in_range(info_output: str) -> bool:
     """
-    Heuristic to decide if a device is currently in range based on bluetoothctl info output.
-
-    We treat a device as "in range" if:
-    1. It's currently connected, or
-    2. It has a recent RSSI value that indicates proximity (stronger than -80 dBm)
+    Simplified range detection based only on connection status.
+    
+    We treat a device as "in range" only if it's currently connected.
+    RSSI is unreliable and causes false positives, so we rely on actual connections.
     """
-    # If device is connected, it's definitely in range
+    # Only consider a device in range if it's actually connected
     if "Connected: yes" in info_output:
+        logger.debug("Device is connected - considered in range")
         return True
         
-    # Check for RSSI value and ensure it indicates proximity
-    if "RSSI:" in info_output:
-        # Extract RSSI value
-        for line in info_output.split('\n'):
-            if "RSSI:" in line:
-                try:
-                    # Extract the numeric value
-                    rssi_str = line.split("RSSI:")[1].strip()
-                    rssi = int(rssi_str)
-                    
-                    # RSSI threshold for "in range" - typical Bluetooth range:
-                    # -50 to -30 dBm: Very close (few meters)
-                    # -80 to -50 dBm: Medium range
-                    # < -80 dBm: Far/weak signal
-                    if rssi > -80:  # Only consider devices with reasonable signal strength
-                        logger.debug(f"Device in range with RSSI: {rssi} dBm")
-                        return True
-                    else:
-                        logger.debug(f"Device has weak RSSI: {rssi} dBm, considered out of range")
-                        return False
-                except (ValueError, IndexError) as e:
-                    logger.debug(f"Could not parse RSSI value: {e}")
-                    
-    # TxPower alone is not a reliable indicator of proximity
+    # Don't use RSSI as it's unreliable and causes false positives
+    logger.debug("Device not connected - considered out of range")
     return False
 
 
@@ -724,20 +702,26 @@ def probe_devices(mac_addresses: list[str], disconnect_after: bool = True) -> di
 
 def scan_for_devices_in_range() -> set[str]:
     """
-    Scan for Bluetooth devices that are currently in range.
+    Scan for Bluetooth devices that are currently in range using connection-based detection only.
 
-    Uses both pybluez discovery and bluetoothctl to get a comprehensive list
-    of devices that are discoverable or previously paired devices that are in range.
+    This function no longer uses RSSI-based detection to avoid false positives.
+    It only considers devices that are actually connected or can be successfully connected to.
 
     Returns:
         Set of MAC addresses of devices in range
     """
     devices_in_range: set[str] = set()
 
-    # Refresh bluetoothctl scan data to get recent RSSI readings
-    _refresh_bluetooth_scan(IN_RANGE_SCAN_SECONDS)
+    # Method 1: Get currently connected devices (most reliable)
+    try:
+        logger.debug("Getting currently connected devices...")
+        connected_devices = get_all_connected_devices()
+        devices_in_range.update(connected_devices)
+        logger.debug(f"Found {len(connected_devices)} connected device(s)")
+    except Exception as e:
+        logger.debug(f"Error getting connected devices: {e}")
 
-    # Method 1: Use pybluez to discover visible devices
+    # Method 2: Use pybluez to discover visible devices (less reliable but still connection-based)
     try:
         logger.debug("Scanning for discoverable devices using pybluez...")
         discovered_devices = bluetooth.discover_devices(
@@ -750,46 +734,7 @@ def scan_for_devices_in_range() -> set[str]:
     except Exception as e:
         logger.debug(f"Unexpected error during pybluez scan: {e}")
 
-    # Method 2: Use bluetoothctl to scan for paired devices that are in range
-    # This is more reliable for iOS devices and devices that don't advertise
-    try:
-        logger.debug("Checking for paired devices in range using bluetoothctl...")
-        # Get all known devices (both paired and discovered)
-        result = subprocess.run(
-            ["bluetoothctl", "devices"],
-            capture_output=True,
-            text=True,
-            timeout=10,
-        )
-
-        if result.returncode == 0:
-            for line in result.stdout.split("\n"):
-                line = line.strip()
-                if line.startswith("Device "):
-                    parts = line.split(" ", 2)
-                    if len(parts) >= 2:
-                        mac_address = parts[1]
-                        # Check if the device is actually accessible by getting its info
-                        info_result = subprocess.run(
-                            ["bluetoothctl", "info", mac_address],
-                            capture_output=True,
-                            text=True,
-                            timeout=5,
-                        )
-                        if info_result.returncode == 0 and _device_info_indicates_in_range(
-                            info_result.stdout
-                        ):
-                            devices_in_range.add(mac_address)
-                            logger.debug(f"Device in range: {mac_address}")
-                        else:
-                            logger.debug(f"Device out of range (no RSSI/connection): {mac_address}")
-
-        logger.debug(f"Total devices in range: {len(devices_in_range)}")
-    except subprocess.TimeoutExpired:
-        logger.debug("Timeout checking devices in range")
-    except Exception as e:
-        logger.debug(f"Error checking devices in range: {e}")
-
+    logger.debug(f"Total devices in range (connection-based): {len(devices_in_range)}")
     return devices_in_range
 
 

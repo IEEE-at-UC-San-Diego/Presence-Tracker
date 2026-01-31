@@ -111,6 +111,12 @@ recently_seen_devices: dict[str, float] = {}
 # Track the last time we recorded any positive signal per device (not pruned with TTL)
 last_presence_signal: dict[str, float] = {}
 
+# Track consecutive positive detections for each device (for confirmation requirement)
+consecutive_positive_detections: dict[str, int] = {}
+
+# Number of consecutive positive detections required before marking device as present
+POSITIVE_DETECTION_CONFIRMATIONS = max(1, int(os.getenv("POSITIVE_DETECTION_CONFIRMATIONS", "2")))
+
 # Track consecutive cycles where a device was missing from the presence set
 absence_miss_streaks: dict[str, int] = {}
 
@@ -568,8 +574,23 @@ def check_and_update_devices() -> None:
         streak = absence_miss_streaks.get(mac_address, 0)
 
         if is_present_now:
+            # Reset absence streak
             absence_miss_streaks.pop(mac_address, None)
+            
+            # Increment positive detection counter
+            consecutive_positive_detections[mac_address] = consecutive_positive_detections.get(mac_address, 0) + 1
+            
+            # Check if we have enough confirmations to consider device present
+            if consecutive_positive_detections[mac_address] < POSITIVE_DETECTION_CONFIRMATIONS:
+                is_present_now = False
+                held_present_reasons.append(
+                    f"building confirmations {consecutive_positive_detections[mac_address]}/{POSITIVE_DETECTION_CONFIRMATIONS}"
+                )
         else:
+            # Reset positive detection counter
+            consecutive_positive_detections[mac_address] = 0
+            
+            # Increment absence streak
             streak += 1
             absence_miss_streaks[mac_address] = streak
 
