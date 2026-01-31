@@ -1,4 +1,4 @@
-u// Button injection removed -- handled in index.html
+// Button injection removed -- handled in index.html
 
 let integrations = [];
 
