@@ -1,6 +1,7 @@
 import { v } from "convex/values";
 import { action, mutation, query, internalMutation } from "./_generated/server";
 import { Doc, Id } from "./_generated/dataModel";
+import { internal } from "./_generated/api";
 
 const GRACE_PERIOD_SECONDS = 300;
 const DEVICE_EXPIRATION_MS = GRACE_PERIOD_SECONDS * 1000;
@@ -400,14 +401,14 @@ export const deleteDevice = mutation({
 
 export const cleanupExpiredGracePeriods = action({
   args: {},
-  handler: async (ctx) => {
-    return cleanupExpiredDevicesCore(ctx);
+  handler: async (ctx): Promise<CleanupResult> => {
+    return ctx.runMutation(internal.devices.cleanupExpiredGracePeriodsInternal, {});
   },
 });
 
 export const cleanupExpiredGracePeriodsInternal = internalMutation({
   args: {},
-  handler: async (ctx) => {
+  handler: async (ctx): Promise<CleanupResult> => {
     return cleanupExpiredDevicesCore(ctx);
   },
 });
