@@ -3,7 +3,7 @@ import { action, mutation, query, internalMutation } from "./_generated/server";
 import { Doc, Id } from "./_generated/dataModel";
 
 const GRACE_PERIOD_SECONDS = 300;
-const DEVICE_EXPIRATION_MS = 5 * 60 * 1000;
+const DEVICE_EXPIRATION_MS = GRACE_PERIOD_SECONDS * 1000;
 
 type CleanupResult = { deletedCount: number; deletedMacs: string[] };
 
@@ -33,10 +33,17 @@ const deleteDeviceAndLogs = async (
 };
 
 const cleanupExpiredDevicesCore = async (ctx: any): Promise<CleanupResult> => {
-  const cutoff = Date.now() - DEVICE_EXPIRATION_MS;
+  const now = Date.now();
 
   const devices = await ctx.db.query("devices").collect();
-  const expiredDevices = devices.filter((device: Doc<"devices">) => device.lastSeen < cutoff);
+  const expiredDevices = devices.filter((device: Doc<"devices">) => {
+    if (!device.pendingRegistration) {
+      return false;
+    }
+
+    const gracePeriodEnd = device.gracePeriodEnd ?? device.firstSeen + DEVICE_EXPIRATION_MS;
+    return gracePeriodEnd <= now;
+  });
 
   const deletedMacs: string[] = [];
 
