@@ -62,6 +62,16 @@ This system is designed primarily for **Raspberry Pi deployment** with Bluetooth
 - **Discord** (optional) - For Discord integration notifications
 - **Slack** (optional) - For Slack integration notifications
 
+## l2ping
+
+`l2ping` is a utility for sending ICMPv6 echo requests to a Bluetooth device. It is used to determine if a device is present on the network.
+
+Run the command
+```
+sudo setcap cap_net_raw+ep /usr/bin/l2ping
+``` 
+to grant the l2ping utility the necessary permissions to send ICMPv6 echo requests.
+
 ## Quick Start
 
 ### Automated Setup (Recommended)
@@ -376,24 +386,18 @@ cp .env.example .env
 
 ### Required Variables
 
+These variables must be set in your `.env` file for the tracker to run:
+
 | Variable | Description | Example |
 |----------|-------------|---------|
-| `CONVEX_DEPLOYMENT_URL` | Your Convex backend deployment URL (required) | `https://chatty-akita-508.convex.cloud` |
-| `ORGANIZATION_NAME` | Display name for your organization (e.g., "My Organization") | - |
-| `REGISTRATION_RETRY_SECONDS` | How frequently the tracker retries publishing a newly seen device | `5` |
-| `UNPUBLISHED_DEVICE_TTL_SECONDS` | How long to keep retrying to publish a device after it disconnects | `600` |
+| `CONVEX_DEPLOYMENT_URL` | Your Convex backend deployment URL (cloud deployment) | `https://chatty-akita-508.convex.cloud` |
 
-Note: `CONVEX_DEPLOYMENT_URL` is for the tracker/`.env` file. For the web dashboard, configure `CONVEX_DEPLOYMENT_URL` in GitHub Secrets (if using GitHub Pages) or as a Docker environment variable.
+**Authentication Variables (Set in Convex Dashboard)**
 
-### Convex Environment Variables (Authentication)
-
-The web dashboard uses password authentication to protect access. Configure these in your **Convex dashboard** under **Settings > Environment Variables**:
-
-| Variable | Description | Required |
-|----------|-------------|----------|
-| `AUTH_PASSWORD` | Regular user password - provides view-only access | ✅ Yes |
-| `ADMIN_PASSWORD` | Admin password - provides full access to all features (edit, delete, manage) | Optional |
-| `ORGANIZATION_NAME` | Organization name for UI customization (fallback if not set in deployment config) | Optional |
+| Variable | Description | Required | Where to Set |
+|----------|-------------|----------|--------------|
+| `AUTH_PASSWORD` | Regular user password - provides view-only access | ✅ Yes | Convex Dashboard → Settings → Environment Variables |
+| `ADMIN_PASSWORD` | Admin password - provides full access (edit, delete, manage) | Optional | Convex Dashboard → Settings → Environment Variables |
 
 **Setting up Authentication:**
 
@@ -407,60 +411,130 @@ The web dashboard uses password authentication to protect access. Configure thes
 - **User** (AUTH_PASSWORD): View device status, attendance logs, and run Bluetooth scans
 - **Admin** (ADMIN_PASSWORD): All user permissions plus device registration, editing, deletion, and integration management
 
-### Presence Tracking Configuration
+### Optional Variables
+
+These have sensible defaults and only need to be changed if you want to customize behavior.
+
+#### Authentication
 
 | Variable | Description | Default |
 |----------|-------------|---------|
-| `PRESENT_TTL_SECONDS` | How long a device is considered present after last seen (seconds) | `120` |
-| `NEWLY_REGISTERED_GRACE_PERIOD` | Grace period for newly registered devices to enter polling cycle (seconds) | `120` |
-| `GRACE_PERIOD_SECONDS` | Time new devices have to be registered before auto-deletion (seconds) | `300` |
-| `ABSENCE_HYSTERESIS_CYCLES` | Number of consecutive missing cycles before marking a device absent | `2` |
-| `ALL_SILENT_ABSENCE_CYCLES` | Allow absence flips after this many zero-signal cycles (0 = always require signal) | `2` |
+| `ADMIN_PASSWORD` | Admin password - provides full access to all features | Not set (user-only access) |
 
-### Probing Strategy
+#### Convex Configuration
 
 | Variable | Description | Default |
 |----------|-------------|---------|
-| `FULL_PROBE_ENABLED` | Enable full probing (attempt connect+disconnect for each device) | `true` |
-| `FULL_PROBE_INTERVAL_SECONDS` | Time between full probe cycles (seconds) | `60` |
-| `FULL_PROBE_DISCONNECT_AFTER` | disconnect after successful probe | `true` |
-| `REQUIRE_PRESENCE_SIGNAL_FOR_ABSENCE` | Only mark absent if presence signal was detected in a cycle | `true` |
-| `IN_RANGE_SCAN_SECONDS` | Scan duration to refresh RSSI for in-range detection | `5` |
-| `DISCONNECT_AFTER_SUCCESS` | Disconnect after successful auto-reconnect to free connection slots | `true` |
-| `DISCONNECT_CONNECTED_AFTER_CYCLE` | Disconnect connected devices after each cycle to avoid limits | `true` |
-| `CONNECT_TIMEOUT_SECONDS` | Max wait time for bluetoothctl connect attempts (seconds) | `10` |
-| `MAX_RECONNECT_PER_CYCLE` | Maximum reconnect attempts per cycle (0 = no limit) | `4` |
-| `ALLOW_PAIRED_PROBE_ON_EMPTY_SCAN` | Probe paired devices when scan finds nothing in range | `true` |
+| `CONVEX_SELF_HOSTED_URL` | Self-hosted Convex URL (alternative to CONVEX_DEPLOYMENT_URL) | Not set |
+| `CONVEX_SELF_HOSTED_ADMIN_KEY` | Admin key for self-hosted Convex | Not set |
+| `CONVEX_URL_MODE` | Mode selector: `convex` (cloud) or `selfhosted` | `convex` |
+| `DEPLOYMENT_MODE` | Deployment mode (same as CONVEX_URL_MODE) | `convex` |
+| `ORGANIZATION_NAME` | Display name for your organization | `Presence Tracker` |
+
+#### Presence Tracking
+
+| Variable | Description | Default |
+|----------|-------------|---------|
+| `GRACE_PERIOD_SECONDS` | Time new devices have to be registered before auto-deletion | `300` |
+| `PRESENT_TTL_SECONDS` | How long a device is considered present after last seen | `45` |
+| `REGISTRATION_RETRY_SECONDS` | How frequently the tracker retries publishing a newly seen device | `5` |
+| `UNPUBLISHED_DEVICE_TTL_SECONDS` | How long to keep retrying to publish a device after it disconnects | `600` |
+| `ENABLE_DEVICE_DIAGNOSTICS` | Enable detailed device diagnostic logging | `false` |
+| `ENABLE_ADAPTIVE_HYSTERESIS` | Enable adaptive hysteresis for presence smoothing | `true` |
+| `ABSENCE_HOLD_SECONDS` | Hold time before allowing absence transition | `120` |
+| `ABSENCE_CONSECUTIVE_MISS_THRESHOLD` | Number of consecutive misses before marking absent | `3` |
+| `FLAP_MONITOR_WINDOW_SECONDS` | Time window for detecting status flapping | `3600` |
+| `FLAP_ALERT_THRESHOLD` | Number of transitions in window to trigger flap alert | `4` |
+| `ENABLE_AUTO_FREEZE_ON_FLAP` | Auto-freeze device status when flapping detected | `true` |
+| `AUTO_FREEZE_DURATION_SECONDS` | How long to freeze device status when flapping | `300` |
+| `DEVICE_OVERRIDE_FILE` | Path to JSON file with device overrides | `config/device_overrides.json` |
+| `DEVICE_OVERRIDE_REFRESH_SECONDS` | How often to reload device override file | `30` |
+| `FAST_PATH_QUEUE_ENABLED` | Enable fast-path queue for rapid presence events | `true` |
+| `FAST_PATH_EVENT_SUPPRESSION_SECONDS` | Suppress duplicate fast-path events within this window | `3` |
+| `FAST_PATH_QUEUE_HOST` | Fast-path queue server host | `127.0.0.1` |
+| `FAST_PATH_QUEUE_PORT` | Fast-path queue server port | `51975` |
+| `FAST_PATH_QUEUE_AUTH_KEY` | Fast-path queue authentication key | `presence-fast-path` |
+| `FAST_PATH_QUEUE_RETRY_SECONDS` | Retry delay for fast-path queue connection | `5` |
+| `DISCONNECT_CONNECTED_AFTER_CYCLE` | Disconnect devices after each polling cycle | `true` |
+
+#### Bluetooth
+
+| Variable | Description | Default |
+|----------|-------------|---------|
+| `L2PING_TIMEOUT_SECONDS` | Timeout for l2ping device detection | `1` |
+| `L2PING_COUNT` | Number of pings per device in each cycle | `1` |
+| `CONNECT_TIMEOUT_SECONDS` | Max wait time for bluetoothctl connect attempts | `10` |
+| `DEVICE_INFO_CACHE_SECONDS` | Cache TTL for bluetoothctl info calls | `5` |
+| `ADAPTER_WATCHDOG_INTERVAL_SECONDS` | Interval for checking adapter health (0 = disabled) | `60` |
+| `ADAPTER_RECOVERY_BACKOFF_SECONDS` | Backoff time between adapter recovery attempts | `5` |
+| `ADVERTISE_NUDGE_COMMAND` | Command to nudge LE advertising if needed | `bluetoothctl advertise on` |
+| `ADVERTISE_SCAN_DURATION_SECONDS` | Scan duration for adapter recovery | `3` |
+
+#### Frontend
+
+| Variable | Description | Default |
+|----------|-------------|---------|
+| `PORT` | Frontend server port | `3132` |
+| `FRONTEND_PORT` | Alternative frontend port (same as PORT) | `3132` |
+
+#### Logging
+
+| Variable | Description | Default |
+|----------|-------------|---------|
+| `LOG_DIR` | Directory for log files | `logs` (created if needed) |
+| `LOG_MAX_LINES` | Maximum lines per log file before rotation | Not set (no rotation) |
 
 ### Example .env File
 
 ```bash
-# Convex Deployment URL (required)
+# Required
 CONVEX_DEPLOYMENT_URL=https://your-convex-deployment.convex.cloud
 
-# Organization Name
-ORGANIZATION_NAME=Your Organization Name
+# Optional - Authentication (set in Convex Dashboard)
+# AUTH_PASSWORD=your-password-here
+# ADMIN_PASSWORD=admin-password-here
 
-# Presence Tracking
-PRESENT_TTL_SECONDS=120
-NEWLY_REGISTERED_GRACE_PERIOD=120
+# Optional - Organization Name
+ORGANIZATION_NAME=My Organization
+
+# Optional - Presence Tracking (defaults shown)
 GRACE_PERIOD_SECONDS=300
-ABSENCE_HYSTERESIS_CYCLES=2
-ALL_SILENT_ABSENCE_CYCLES=2
-
-# Probing Strategy
-FULL_PROBE_ENABLED=true
-FULL_PROBE_INTERVAL_SECONDS=60
-FULL_PROBE_DISCONNECT_AFTER=true
-REQUIRE_PRESENCE_SIGNAL_FOR_ABSENCE=true
-IN_RANGE_SCAN_SECONDS=5
-
-# Connection Management
-DISCONNECT_AFTER_SUCCESS=true
+PRESENT_TTL_SECONDS=45
+REGISTRATION_RETRY_SECONDS=5
+UNPUBLISHED_DEVICE_TTL_SECONDS=600
+ENABLE_DEVICE_DIAGNOSTICS=false
+ENABLE_ADAPTIVE_HYSTERESIS=true
+ABSENCE_HOLD_SECONDS=120
+ABSENCE_CONSECUTIVE_MISS_THRESHOLD=3
+FLAP_MONITOR_WINDOW_SECONDS=3600
+FLAP_ALERT_THRESHOLD=4
+ENABLE_AUTO_FREEZE_ON_FLAP=true
+AUTO_FREEZE_DURATION_SECONDS=300
+DEVICE_OVERRIDE_FILE=config/device_overrides.json
+DEVICE_OVERRIDE_REFRESH_SECONDS=30
+FAST_PATH_QUEUE_ENABLED=true
+FAST_PATH_EVENT_SUPPRESSION_SECONDS=3
+FAST_PATH_QUEUE_HOST=127.0.0.1
+FAST_PATH_QUEUE_PORT=51975
+FAST_PATH_QUEUE_AUTH_KEY=presence-fast-path
+FAST_PATH_QUEUE_RETRY_SECONDS=5
 DISCONNECT_CONNECTED_AFTER_CYCLE=true
+
+# Optional - Bluetooth (defaults shown)
+L2PING_TIMEOUT_SECONDS=1
+L2PING_COUNT=1
 CONNECT_TIMEOUT_SECONDS=10
-MAX_RECONNECT_PER_CYCLE=4
-ALLOW_PAIRED_PROBE_ON_EMPTY_SCAN=true
+DEVICE_INFO_CACHE_SECONDS=5
+ADAPTER_WATCHDOG_INTERVAL_SECONDS=60
+ADAPTER_RECOVERY_BACKOFF_SECONDS=5
+ADVERTISE_NUDGE_COMMAND=bluetoothctl advertise on
+ADVERTISE_SCAN_DURATION_SECONDS=3
+
+# Optional - Frontend (defaults shown)
+PORT=3132
+
+# Optional - Logging (defaults shown)
+LOG_DIR=logs
 ```
 
 ## Usage Instructions
@@ -727,12 +801,7 @@ curl -X POST -H 'Content-type: application/json' --data '{"text":"Test message"}
 
 #### Newly Registered Device Not Updating Immediately
 
-When you first register a device (transition from pending to registered), there is an automatic grace period (120 seconds by default) that ensures the device enters the polling cycle immediately. During this time:
-- The device will be tracked for connect/disconnect management
-- Presence status will update within the next polling cycle
-- The grace period prevents race conditions between device registration and Bluetooth polling
-
-Adjust this grace period by setting `NEWLY_REGISTERED_GRACE_PERIOD` in your `.env` file.
+When you first register a device (transition from pending to registered), the device is immediately entered into the polling cycle. Presence status will update within the next polling cycle (every 5 seconds by default).
 
 #### Pending Devices Not Auto-Deleted
 
@@ -782,14 +851,17 @@ uv run src/presence_tracker.py
 ### Performance Issues
 
 #### Slow Device Detection
-- Adjust `FULL_PROBE_INTERVAL_SECONDS` (default: 60)
-- Reduce `IN_RANGE_SCAN_SECONDS` (default: 5)
+- Reduce `PRESENT_TTL_SECONDS` (default: 45) for faster absence detection
+- Reduce `L2PING_COUNT` (default: 1) or `L2PING_TIMEOUT_SECONDS` (default: 1)
+- Reduce `DEVICE_INFO_CACHE_SECONDS` (default: 5) for fresher device info
 - Check Bluetooth hardware issues with `hciconfig`
 - Reduce number of tracked devices
 
 #### High CPU Usage
-- Decrease polling frequency
-- Disable full probing if not needed: `FULL_PROBE_ENABLED=false`
+- Decrease `FLAP_MONITOR_WINDOW_SECONDS` (default: 3600) to reduce monitoring overhead
+- Disable device diagnostics: `ENABLE_DEVICE_DIAGNOSTICS=false`
+- Disable adaptive hysteresis: `ENABLE_ADAPTIVE_HYSTERESIS=false`
+- Disable fast-path queue: `FAST_PATH_QUEUE_ENABLED=false`
 - Check for Bluetooth adapter issues
 
 ### Setup Issues

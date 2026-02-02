@@ -750,7 +750,6 @@ def log_attendance(mac_address: str, name: str, status: str) -> bool:
         with ThreadPoolExecutor(max_workers=1) as executor:
             future = executor.submit(_mutation)
             future.result(timeout=CONVEX_QUERY_TIMEOUT)
-        logger.info(f"✓ Logged attendance: {name} -> {status}")
         return True
     except TimeoutError:
         logger.error(f"✗ Convex mutation timed out after {CONVEX_QUERY_TIMEOUT} seconds for attendance logging")
