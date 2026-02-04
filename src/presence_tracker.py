@@ -11,7 +11,9 @@ from typing import Any, Optional
 import convex
 from dotenv import load_dotenv
 import bluetooth_scanner
+import bluetooth_agent
 from concurrent.futures import ThreadPoolExecutor, TimeoutError
+from flask import Flask, request, jsonify
 
 from fast_path_queue import start_queue_server
 from logging_utils import configure_root_logger
@@ -130,6 +132,9 @@ _fast_path_queue = None
 _fast_path_thread: threading.Thread | None = None
 _fast_path_stop_event = threading.Event()
 _fast_path_recent_events: dict[str, float] = {}
+
+# Flask API server
+app = Flask(__name__)
 
 
 def _prune_device_state(known_macs: set[str]) -> None:
@@ -513,6 +518,8 @@ def register_new_device(mac_address: str, name: str | None = None) -> dict[str, 
     New devices are registered in pending state, giving them time to be
     properly named before being tracked for presence.
 
+    Only registers device if it has reached the "paired" state in bluetooth_agent.
+
     Args:
         mac_address: The MAC address of the device
         name: Optional device name from Bluetooth scan
@@ -520,6 +527,17 @@ def register_new_device(mac_address: str, name: str | None = None) -> dict[str, 
     Returns:
         Device dictionary if registration was successful, None otherwise
     """
+    # Check pairing state before registering to Convex
+    try:
+        if not bluetooth_agent.is_paired(mac_address):
+            logger.info(
+                f"Skipping Convex registration for {mac_address}: device not yet paired (awaiting pairing state)"
+            )
+            return None
+    except Exception as e:
+        logger.warning(f"Error checking pairing state for {mac_address}: {e}")
+        return None
+
     def _mutation():
         return get_convex_client().mutation(
             "devices:registerPendingDevice",
@@ -528,7 +546,7 @@ def register_new_device(mac_address: str, name: str | None = None) -> dict[str, 
                 "name": name or "",
             },
         )
-    
+
     try:
         logger.info(f"→ register_new_device called: mac={mac_address}, name='{name}'")
         with ThreadPoolExecutor(max_workers=1) as executor:
@@ -653,7 +671,8 @@ def cleanup_expired_devices() -> bool:
                         logger.info(f"Disconnecting and removing expired device: {mac_address}")
                         bluetooth_scanner.disconnect_device(mac_address)
                         bluetooth_scanner.remove_device(mac_address)
-                        logger.info(f"Successfully removed Bluetooth pairing for: {mac_address}")
+                        bluetooth_agent.reset_device_state(mac_address)
+                        logger.info(f"Successfully removed Bluetooth pairing and cleared state for: {mac_address}")
                         # Remove from failed registrations since device was cleaned up
                         failed_registrations.discard(mac_address)
                     except Exception as e:
@@ -747,7 +766,8 @@ def cleanup_stale_bluetooth_pairings() -> None:
             for mac_address in devices_to_remove:
                 try:
                     bluetooth_scanner.remove_device(mac_address)
-                    logger.info(f"Removed expired pending device Bluetooth pairing: {mac_address}")
+                    bluetooth_agent.reset_device_state(mac_address)
+                    logger.info(f"Removed expired pending device Bluetooth pairing and cleared state: {mac_address}")
                 except Exception as e:
                     logger.error(f"Failed to remove expired pending device {mac_address}: {e}")
         else:
@@ -998,12 +1018,109 @@ def check_and_update_devices() -> None:
     cleanup_expired_devices()
     cleanup_stale_bluetooth_pairings()
 
+    # Clean up failed/timeout pairings from bluetooth_agent
+    try:
+        failed_pairing_addresses = bluetooth_agent.cleanup_failed_pairings()
+        if failed_pairing_addresses:
+            logger.info(f"Processing {len(failed_pairing_addresses)} failed/timeout pairing(s)")
+            for address in failed_pairing_addresses:
+                try:
+                    bluetooth_scanner.remove_device(address)
+                    device = get_device_by_mac(address)
+                    if device and device.get("pendingRegistration"):
+                        logger.info(f"Clearing pending Convex record for failed pairing: {address}")
+                    failed_registrations.discard(address)
+                    unpublished_devices.pop(address, None)
+                    logger.info(f"Cleaned up failed pairing: {address}")
+                except Exception as e:
+                    logger.error(f"Error cleaning up failed pairing {address}: {e}")
+    except Exception as e:
+        logger.error(f"Error during failed pairing cleanup: {e}")
+
     if newly_registered_count:
         logger.info(f"Registered {newly_registered_count} new device(s) as pending")
     if updated_count:
         logger.info(f"Updated {updated_count} device status(es) this cycle")
     else:
         logger.info("No device status changes in this cycle")
+
+
+def delete_device_from_convex(mac_address: str) -> bool:
+    """Delete a device from Convex using the deleteDevice mutation."""
+    def _mutation():
+        return get_convex_client().mutation(
+            "devices:deleteDevice",
+            {"macAddress": mac_address},
+        )
+
+    try:
+        with ThreadPoolExecutor(max_workers=1) as executor:
+            future = executor.submit(_mutation)
+            future.result(timeout=CONVEX_QUERY_TIMEOUT)
+            logger.info(f"Deleted device {mac_address} from Convex")
+            return True
+    except TimeoutError:
+        logger.error(f"✗ Convex mutation timed out deleting device {mac_address}")
+        return False
+    except Exception as e:
+        logger.error(f"✗ Error deleting device {mac_address} from Convex: {e}")
+        return False
+
+
+@app.route("/api/forget-device", methods=["POST"])
+def forget_device() -> tuple[dict[str, Any], int]:
+    """
+    Forget a device by removing it from Bluetooth, clearing agent state,
+    and deleting from Convex.
+
+    Expects JSON body with 'address' field (MAC address).
+
+    Returns:
+        JSON response with success/error status
+    """
+    try:
+        data = request.get_json()
+        if not data or not isinstance(data, dict):
+            return {"error": "Invalid JSON body"}, 400
+
+        address = data.get("address")
+        if not address or not isinstance(address, str):
+            return {"error": "Missing or invalid 'address' field"}, 400
+
+        mac_address = _normalize_mac(address)
+
+        # Remove from bluetoothctl
+        try:
+            bluetooth_scanner.remove_device(mac_address)
+        except Exception as e:
+            logger.warning(f"Failed to remove {mac_address} from bluetoothctl: {e}")
+
+        # Clear bluetooth_agent pending state
+        try:
+            bluetooth_agent.reset_device_state(mac_address)
+        except Exception as e:
+            logger.warning(f"Failed to clear agent state for {mac_address}: {e}")
+
+        # Delete from Convex if device exists
+        device = get_device_by_mac(mac_address)
+        if device:
+            delete_device_from_convex(mac_address)
+
+        # Clean up local tracking state
+        failed_registrations.discard(mac_address)
+        unpublished_devices.pop(mac_address, None)
+        device_previous_status.pop(mac_address, None)
+        last_presence_signal.pop(mac_address, None)
+        device_signal_stats.pop(mac_address, None)
+        status_transition_history.pop(mac_address, None)
+        device_freeze_until.pop(mac_address, None)
+
+        logger.info(f"Successfully forgot device: {mac_address}")
+        return {"success": True, "address": mac_address}, 200
+
+    except Exception as e:
+        logger.error(f"Error in forget_device endpoint: {e}")
+        return {"error": "Internal server error"}, 500
 
 
 def run_presence_tracker() -> None:

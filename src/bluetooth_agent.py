@@ -55,6 +55,9 @@ ADVERTISE_SCAN_DURATION_SECONDS = int(os.getenv("ADVERTISE_SCAN_DURATION_SECONDS
 FAST_PATH_QUEUE_ENABLED = os.getenv("FAST_PATH_QUEUE_ENABLED", "true").lower() in ("1", "true", "yes", "on")
 FAST_PATH_QUEUE_RETRY_SECONDS = int(os.getenv("FAST_PATH_QUEUE_RETRY_SECONDS", "5"))
 
+# Pairing timeout configuration
+PAIRING_TIMEOUT_SECONDS = int(os.getenv("PAIRING_TIMEOUT_SECONDS", "30"))
+
 
 class Rejected(dbus.DBusException):
     """Exception for rejected pairing requests."""
@@ -73,6 +76,7 @@ class BluetoothAgent(dbus.service.Object):
     def __init__(self, bus, path):
         super().__init__(bus, path)
         self.bus = bus
+        self.pending_devices = {}  # {address: {"state": str, "timestamp": float}}
         logger.info(f"Bluetooth agent initialized at {path}")
 
     def _set_trusted(self, device_path):
@@ -256,6 +260,18 @@ class BluetoothAgent(dbus.service.Object):
         device_info = self._get_device_info(device)
         logger.info(f"==== RequestConfirmation START ====")
         logger.info(f"RequestConfirmation: {device_info} Passkey: {passkey:06d}")
+        # Track device as pairing_request
+        try:
+            props = self._get_device_props(device)
+            address = props.get("Address")
+            if address:
+                self.pending_devices[address] = {
+                    "state": "pairing_request",
+                    "timestamp": time.time(),
+                }
+                logger.info(f"Device {address} marked as pairing_request")
+        except Exception as e:
+            logger.warning(f"Failed to track pairing request: {e}")
         # Auto-confirm all pairing requests
         self._set_trusted(device)
         logger.info(f"Pairing confirmed for {device_info}")
@@ -268,6 +284,18 @@ class BluetoothAgent(dbus.service.Object):
         device_info = self._get_device_info(device)
         logger.info(f"==== RequestAuthorization START ====")
         logger.info(f"RequestAuthorization: {device_info}")
+        # Track device as pairing_request
+        try:
+            props = self._get_device_props(device)
+            address = props.get("Address")
+            if address:
+                self.pending_devices[address] = {
+                    "state": "pairing_request",
+                    "timestamp": time.time(),
+                }
+                logger.info(f"Device {address} marked as pairing_request")
+        except Exception as e:
+            logger.warning(f"Failed to track pairing request: {e}")
         # Auto-authorize all pairing requests
         self._set_trusted(device)
         logger.info(f"Authorization granted for {device_info}")
@@ -278,6 +306,64 @@ class BluetoothAgent(dbus.service.Object):
     def Cancel(self):
         """Cancel a pending pairing operation."""
         logger.info("Pairing cancelled")
+        # Mark all pending devices as failed
+        failed_addresses = []
+        for address, info in list(self.pending_devices.items()):
+            if info["state"] in ("pairing_request", "pairing"):
+                info["state"] = "failed"
+                failed_addresses.append(address)
+                logger.info(f"Device {address} marked as failed due to cancellation")
+        if failed_addresses:
+            logger.info(f"Cancelled pairing for devices: {failed_addresses}")
+
+    def is_paired(self, address: str) -> bool:
+        """Check if a device is in paired state."""
+        return (
+            address in self.pending_devices
+            and self.pending_devices[address].get("state") == "paired"
+        )
+
+    def reset_device_state(self, address: str) -> bool:
+        """Clear a device from pending state (for cleanup)."""
+        if address in self.pending_devices:
+            state = self.pending_devices[address].get("state")
+            del self.pending_devices[address]
+            logger.info(f"Device {address} state cleared (was {state})")
+            return True
+        return False
+
+    def cleanup_failed_pairings(self) -> list[str]:
+        """Remove devices in failed/timeout state and returns their addresses.
+        
+        Returns:
+            List of MAC addresses for devices that were in failed or timeout state.
+            These addresses can be used to remove devices from bluetoothctl.
+        """
+        failed_or_timeout = []
+        now = time.time()
+        
+        # First, check for timeouts
+        for address, info in list(self.pending_devices.items()):
+            age = now - info.get("timestamp", now)
+            if (
+                info.get("state") in ("pairing_request", "pairing")
+                and age > PAIRING_TIMEOUT_SECONDS
+            ):
+                info["state"] = "timeout"
+                logger.info(f"Device {address} marked as timeout (age={age:.1f}s)")
+        
+        # Then collect and remove failed/timeout devices
+        for address in list(self.pending_devices.keys()):
+            state = self.pending_devices[address].get("state")
+            if state in ("failed", "timeout"):
+                failed_or_timeout.append(address)
+                del self.pending_devices[address]
+                logger.info(f"Removed {address} from pending devices (state={state})")
+        
+        if failed_or_timeout:
+            logger.info(f"Cleaned up {len(failed_or_timeout)} failed/timeout pairings")
+        
+        return failed_or_timeout
 
 
 def get_adapter_path(bus):
@@ -402,6 +488,18 @@ def _emit_connected_event(device_path: str, props: dict | None = None):
     if not isinstance(mac, str) or not mac:
         logger.debug("Fast-path event missing MAC for %s", device_path)
         return
+    
+    # Only emit if device is in paired state
+    if mac in _agent_singleton.pending_devices:
+        state = _agent_singleton.pending_devices[mac].get("state")
+        if state != "paired":
+            logger.debug(
+                "Skipping fast-path event for %s (state=%s, not paired)",
+                mac,
+                state,
+            )
+            return
+    
     name = device_props.get("Name")
     _publish_fast_path_event(mac.upper(), name)
 
@@ -410,6 +508,20 @@ def _interfaces_added_handler(object_path: str, interfaces: dict):
     device_props = interfaces.get(DEVICE_INTERFACE)
     if not device_props:
         return
+    
+    # Track device state when Paired property is present
+    if _agent_singleton is not None:
+        address = device_props.get("Address")
+        is_paired = bool(device_props.get("Paired", False))
+        if address:
+            existing_state = _agent_singleton.pending_devices.get(address, {}).get("state")
+            if is_paired and existing_state in ("pairing_request", "pairing"):
+                _agent_singleton.pending_devices[address]["state"] = "paired"
+                logger.info(f"Device {address} marked as paired (InterfacesAdded)")
+            elif not is_paired and existing_state:
+                _agent_singleton.pending_devices[address]["state"] = "failed"
+                logger.info(f"Device {address} marked as failed (InterfacesAdded)")
+    
     if bool(device_props.get("Connected")):
         _emit_connected_event(object_path, device_props)
 
@@ -417,9 +529,31 @@ def _interfaces_added_handler(object_path: str, interfaces: dict):
 def _properties_changed_handler(interface: str, changed: dict, invalidated, path=None):
     if interface != DEVICE_INTERFACE or not changed:
         return
-    if "Connected" not in changed:
-        return
-    if bool(changed.get("Connected")):
+    
+    if _agent_singleton is not None:
+        # Track pairing success/failure when Paired property changes
+        if "Paired" in changed:
+            try:
+                device = dbus.Interface(
+                    _agent_singleton.bus.get_object(BLUEZ_SERVICE, path),
+                    "org.freedesktop.DBus.Properties"
+                )
+                props = device.GetAll(DEVICE_INTERFACE)
+                address = props.get("Address")
+                is_paired = bool(changed.get("Paired"))
+                
+                if address and address in _agent_singleton.pending_devices:
+                    if is_paired:
+                        _agent_singleton.pending_devices[address]["state"] = "paired"
+                        logger.info(f"Device {address} marked as paired")
+                    else:
+                        _agent_singleton.pending_devices[address]["state"] = "failed"
+                        logger.info(f"Device {address} marked as failed (unpaired)")
+            except Exception as e:
+                logger.warning(f"Failed to track pairing state change: {e}")
+    
+    # Only emit connected event after device is paired
+    if "Connected" in changed and bool(changed.get("Connected")):
         _emit_connected_event(path)
 
 
@@ -649,6 +783,47 @@ def main():
     finally:
         unregister_agent(bus, AGENT_PATH)
         logger.info("Bluetooth agent stopped")
+
+
+def is_paired(address: str) -> bool:
+    """Check if a device is in paired state.
+
+    Args:
+        address: The MAC address of the device to check.
+
+    Returns:
+        True if device is paired, False otherwise or if agent is not initialized.
+    """
+    if _agent_singleton is None:
+        return False
+    return _agent_singleton.is_paired(address)
+
+
+def reset_device_state(address: str) -> bool:
+    """Clear a device from pending state (for cleanup).
+
+    Args:
+        address: The MAC address of the device to reset.
+
+    Returns:
+        True if device was removed from pending state, False otherwise
+        or if agent is not initialized.
+    """
+    if _agent_singleton is None:
+        return False
+    return _agent_singleton.reset_device_state(address)
+
+
+def cleanup_failed_pairings() -> list[str]:
+    """Remove devices in failed/timeout state and returns their addresses.
+
+    Returns:
+        List of MAC addresses for devices that were in failed or timeout state.
+        Returns empty list if agent is not initialized.
+    """
+    if _agent_singleton is None:
+        return []
+    return _agent_singleton.cleanup_failed_pairings()
 
 
 if __name__ == "__main__":
