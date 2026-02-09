@@ -1,8 +1,8 @@
 import json
 import os
+import subprocess
 import time
 import logging
-import threading
 from collections import deque
 from pathlib import Path
 from datetime import datetime
@@ -12,7 +12,6 @@ import convex
 from dotenv import load_dotenv
 import bluetooth_scanner
 import bluetooth_agent
-from concurrent.futures import ThreadPoolExecutor, TimeoutError
 
 from fast_path_queue import start_queue_server
 from logging_utils import configure_root_logger
@@ -125,13 +124,7 @@ consecutive_timeouts = 0
 MAX_CONSECUTIVE_TIMEOUTS = 3
 
 _fast_path_queue = None
-_fast_path_thread: threading.Thread | None = None
-_fast_path_stop_event = threading.Event()
 _fast_path_recent_events: dict[str, float] = {}
-
-# Single shared executor for all Convex calls (serialises access to the
-# non-thread-safe ConvexClient while still allowing timeout enforcement).
-_convex_executor = ThreadPoolExecutor(max_workers=1, thread_name_prefix="convex")
 
 # In-cycle device cache — populated once per check_and_update_devices() call
 # so that get_device_by_mac() doesn't re-query Convex.
@@ -139,36 +132,31 @@ _cycle_device_cache: list[dict[str, Any]] | None = None
 
 
 def _convex_call(fn, timeout: float | None = None):
-    """Submit *fn* to the shared Convex executor with a timeout."""
+    """Call *fn* synchronously with circuit-breaker tracking."""
     global convex_responsive, consecutive_timeouts
-    if timeout is None:
-        timeout = CONVEX_QUERY_TIMEOUT
     try:
-        future = _convex_executor.submit(fn)
-        result = future.result(timeout=timeout)
+        result = fn()
         if consecutive_timeouts > 0:
             consecutive_timeouts = 0
             convex_responsive = True
             logger.info("Convex connection recovered")
         return result
-    except TimeoutError:
+    except Exception as exc:
         consecutive_timeouts += 1
         if consecutive_timeouts >= MAX_CONSECUTIVE_TIMEOUTS:
             convex_responsive = False
             logger.error(
-                "Convex call timed out (%dx) — entering circuit-breaker mode",
+                "Convex call failed (%dx) — entering circuit-breaker mode: %s",
                 consecutive_timeouts,
+                exc,
             )
         else:
             logger.error(
-                "Convex call timed out after %ss (%d/%d)",
-                timeout,
+                "Convex call failed (%d/%d): %s",
                 consecutive_timeouts,
                 MAX_CONSECUTIVE_TIMEOUTS,
+                exc,
             )
-        return None
-    except Exception as exc:
-        logger.error("Convex call failed: %s", exc)
         return None
 
 
@@ -278,58 +266,41 @@ def _prune_device_state(known_macs: set[str]) -> None:
             device_freeze_until.pop(mac, None)
 
 
-def _start_fast_path_consumer() -> None:
-    global _fast_path_queue, _fast_path_thread
+def _init_fast_path_queue() -> None:
+    """Start the fast-path queue server (no consumer thread)."""
+    global _fast_path_queue
     if not FAST_PATH_QUEUE_ENABLED:
         return
-    if _fast_path_thread and _fast_path_thread.is_alive():
+    if _fast_path_queue is not None:
         return
     try:
-        queue = start_queue_server()
+        _fast_path_queue = start_queue_server()
+        logger.info("Fast-path queue server started")
     except Exception as exc:
         logger.error("Failed to start fast-path queue server: %s", exc)
-        return
-
-    _fast_path_queue = queue
-    _fast_path_stop_event.clear()
-
-    thread = threading.Thread(
-        target=_fast_path_consumer_loop,
-        name="FastPathConsumer",
-        daemon=True,
-    )
-    thread.start()
-    _fast_path_thread = thread
-    logger.info("Fast-path queue consumer started")
 
 
-def _stop_fast_path_consumer() -> None:
-    if not FAST_PATH_QUEUE_ENABLED:
-        return
-    _fast_path_stop_event.set()
-    thread = _fast_path_thread
-    if thread and thread.is_alive():
-        thread.join(timeout=2)
-
-
-def _fast_path_consumer_loop() -> None:
-    while not _fast_path_stop_event.is_set():
-        if _fast_path_queue is None:
-            time.sleep(1)
-            continue
+def _drain_fast_path_queue() -> int:
+    """Synchronously drain all pending fast-path events. Returns count processed."""
+    if not FAST_PATH_QUEUE_ENABLED or _fast_path_queue is None:
+        return 0
+    count = 0
+    while True:
         try:
-            payload = _fast_path_queue.get(timeout=1)
+            payload = _fast_path_queue.get_nowait()
         except Empty:
-            continue
+            break
         except Exception as exc:
             logger.warning("Fast-path queue read failed: %s", exc)
-            time.sleep(1)
-            continue
-
+            break
         try:
             _handle_fast_path_payload(payload)
+            count += 1
         except Exception as exc:
             logger.error("Error handling fast-path payload %s: %s", payload, exc)
+    if count:
+        logger.info("Drained %d fast-path event(s)", count)
+    return count
 
 
 def _handle_fast_path_payload(payload: Any) -> None:
@@ -974,6 +945,9 @@ def check_and_update_devices() -> None:
 
     global failed_registrations, _cycle_device_cache
 
+    # -- 0. Drain any fast-path events that arrived since last cycle ---------
+    _drain_fast_path_queue()
+
     # -- 1. Snapshot connected devices (instant bluetoothctl query) ----------
     connected_devices = scan_all_connected_devices()
     connected_set = set(connected_devices)
@@ -1158,6 +1132,20 @@ def delete_device_from_convex(mac_address: str) -> bool:
     return True
 
 
+def _kill_stale_bt_processes() -> None:
+    """Kill orphaned l2ping / bluetoothctl processes from a previous run."""
+    for pattern in ("l2ping", "bluetoothctl"):
+        try:
+            subprocess.run(
+                ["pkill", "-9", "-f", pattern],
+                capture_output=True,
+                timeout=5,
+            )
+        except Exception:
+            pass
+    logger.info("Killed any stale l2ping / bluetoothctl processes")
+
+
 def run_presence_tracker() -> None:
     """
     Main polling loop for the presence tracker.
@@ -1166,6 +1154,8 @@ def run_presence_tracker() -> None:
     Convex as needed.  Uses tiered l2ping scheduling to keep cycle time
     well within the polling interval even with 50+ registered devices.
     """
+    _kill_stale_bt_processes()
+
     logger.info("Starting Presence Tracker")
     logger.info("Polling interval: %ds", POLLING_INTERVAL)
     logger.info("Grace period for new devices: %ds", GRACE_PERIOD_SECONDS)
@@ -1176,10 +1166,7 @@ def run_presence_tracker() -> None:
     )
     logger.info("Convex query timeout: %ds", CONVEX_QUERY_TIMEOUT)
 
-    # Skip startup cleanup to avoid hanging on Convex connection
-    # Stale Bluetooth pairings will be cleaned during polling cycles
-
-    _start_fast_path_consumer()
+    _init_fast_path_queue()
 
     try:
         while True:
@@ -1201,8 +1188,6 @@ def run_presence_tracker() -> None:
     except Exception as e:
         logger.error(f"Fatal error in presence tracker: {e}")
         raise
-    finally:
-        _stop_fast_path_consumer()
 
 
 def main() -> None:

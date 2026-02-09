@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import logging
 import os
-import threading
 from pathlib import Path
 
 
@@ -63,7 +62,6 @@ class LineCappedFileHandler(logging.FileHandler):
         delay: bool = False,
     ) -> None:
         log_path = get_log_path(filename)
-        self._line_lock = threading.RLock()
         self._line_count = 0
         self._max_lines = _get_max_lines(max_lines)
         super().__init__(log_path, mode=mode, encoding=encoding, delay=delay)
@@ -100,12 +98,11 @@ class LineCappedFileHandler(logging.FileHandler):
                 continue
 
     def emit(self, record: logging.LogRecord) -> None:
-        with self._line_lock:
-            if self._line_count >= self._max_lines:
-                self._reset_log_file()
+        if self._line_count >= self._max_lines:
+            self._reset_log_file()
 
-            super().emit(record)
-            self._line_count += 1
+        super().emit(record)
+        self._line_count += 1
 
 
 def configure_logger(

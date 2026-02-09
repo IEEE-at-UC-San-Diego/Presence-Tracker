@@ -15,7 +15,6 @@ to prevent audio output from being routed to the Raspberry Pi.
 import os
 import shlex
 import subprocess
-import threading
 import time
 import dbus
 import dbus.service
@@ -35,7 +34,6 @@ logger = configure_logger(
 )
 
 _fast_path_queue = None
-_fast_path_lock = threading.Lock()
 _fast_path_connect_next = 0.0
 _agent_singleton = None
 
@@ -436,19 +434,18 @@ def _maybe_connect_fast_path_queue(force: bool = False):
     now = time.time()
     if not force and now < _fast_path_connect_next and _fast_path_queue is None:
         return None
-    with _fast_path_lock:
-        if _fast_path_queue is not None:
-            return _fast_path_queue
-        try:
-            queue = connect_to_queue()
-            _fast_path_queue = queue
-            logger.info("Fast-path queue connected")
-            return queue
-        except Exception as exc:
-            _fast_path_queue = None
-            _fast_path_connect_next = now + max(1, FAST_PATH_QUEUE_RETRY_SECONDS)
-            logger.warning("Fast-path queue unavailable: %s", exc)
-            return None
+    if _fast_path_queue is not None:
+        return _fast_path_queue
+    try:
+        queue = connect_to_queue()
+        _fast_path_queue = queue
+        logger.info("Fast-path queue connected")
+        return queue
+    except Exception as exc:
+        _fast_path_queue = None
+        _fast_path_connect_next = now + max(1, FAST_PATH_QUEUE_RETRY_SECONDS)
+        logger.warning("Fast-path queue unavailable: %s", exc)
+        return None
 
 
 def _publish_fast_path_event(mac: str, name: str | None = None, source: str = "bluetooth_agent"):
@@ -468,8 +465,7 @@ def _publish_fast_path_event(mac: str, name: str | None = None, source: str = "b
         logger.info("Enqueued fast-path presence event for %s", mac)
     except Exception as exc:
         logger.warning("Failed to enqueue fast-path event for %s: %s", mac, exc)
-        with _fast_path_lock:
-            _fast_path_queue = None
+        _fast_path_queue = None
 
 
 def _emit_connected_event(device_path: str, props: dict | None = None):
@@ -506,24 +502,21 @@ def _emit_connected_event(device_path: str, props: dict | None = None):
     # Immediately disconnect the device to free the ACL slot.
     # The presence TTL in the tracker keeps the device marked "present"
     # even after the BT connection is torn down.
-    _schedule_disconnect(mac.upper())
+    _disconnect_device(mac.upper())
 
 
-def _schedule_disconnect(mac: str) -> None:
-    """Disconnect a device in a background thread so the D-Bus handler returns quickly."""
-    def _do_disconnect():
-        try:
-            subprocess.run(
-                ["bluetoothctl", "disconnect", mac],
-                capture_output=True,
-                text=True,
-                timeout=5,
-            )
-            logger.info("Fast-path: disconnected %s to free ACL slot", mac)
-        except Exception as exc:
-            logger.debug("Fast-path: disconnect of %s failed (non-critical): %s", mac, exc)
-
-    threading.Thread(target=_do_disconnect, name=f"disconnect-{mac}", daemon=True).start()
+def _disconnect_device(mac: str) -> None:
+    """Synchronously disconnect a device to free the ACL slot."""
+    try:
+        subprocess.run(
+            ["bluetoothctl", "disconnect", mac],
+            capture_output=True,
+            text=True,
+            timeout=5,
+        )
+        logger.info("Fast-path: disconnected %s to free ACL slot", mac)
+    except Exception as exc:
+        logger.debug("Fast-path: disconnect of %s failed (non-critical): %s", mac, exc)
 
 
 def _interfaces_added_handler(object_path: str, interfaces: dict):
