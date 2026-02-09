@@ -3,7 +3,6 @@ import os
 import subprocess
 import time
 import logging
-from collections import deque
 from pathlib import Path
 from datetime import datetime
 from queue import Empty
@@ -55,22 +54,10 @@ POLLING_INTERVAL = int(os.getenv("POLLING_INTERVAL_SECONDS", "15"))
 # Grace period for new device registration in seconds
 GRACE_PERIOD_SECONDS = int(os.getenv("GRACE_PERIOD_SECONDS", "300"))
 
-# Presence TTL for recently seen devices (seconds)
-PRESENT_TTL_SECONDS = int(os.getenv("PRESENT_TTL_SECONDS", "60"))
-
-# Adaptive smoothing / diagnostics configuration
 def _env_flag(name: str, default: str = "false") -> bool:
     return os.getenv(name, default).lower() in ("1", "true", "yes", "on")
 
 
-ENABLE_DEVICE_DIAGNOSTICS = _env_flag("ENABLE_DEVICE_DIAGNOSTICS", "false")
-ENABLE_ADAPTIVE_HYSTERESIS = _env_flag("ENABLE_ADAPTIVE_HYSTERESIS", "true")
-ABSENCE_HOLD_SECONDS = int(os.getenv("ABSENCE_HOLD_SECONDS", "90"))
-ABSENCE_CONSECUTIVE_MISS_THRESHOLD = int(os.getenv("ABSENCE_CONSECUTIVE_MISS_THRESHOLD", "2"))
-FLAP_MONITOR_WINDOW_SECONDS = int(os.getenv("FLAP_MONITOR_WINDOW_SECONDS", "3600"))
-FLAP_ALERT_THRESHOLD = int(os.getenv("FLAP_ALERT_THRESHOLD", "4"))
-ENABLE_AUTO_FREEZE_ON_FLAP = _env_flag("ENABLE_AUTO_FREEZE_ON_FLAP", "true")
-AUTO_FREEZE_DURATION_SECONDS = int(os.getenv("AUTO_FREEZE_DURATION_SECONDS", "300"))
 DEVICE_OVERRIDE_FILE = os.getenv("DEVICE_OVERRIDE_FILE", "config/device_overrides.json")
 DEVICE_OVERRIDE_REFRESH_SECONDS = int(os.getenv("DEVICE_OVERRIDE_REFRESH_SECONDS", "30"))
 
@@ -83,25 +70,14 @@ REGISTRATION_RETRY_SECONDS = int(os.getenv("REGISTRATION_RETRY_SECONDS", "5"))
 # How long to keep retrying to publish a device after it disconnects (seconds)
 UNPUBLISHED_DEVICE_TTL_SECONDS = int(os.getenv("UNPUBLISHED_DEVICE_TTL_SECONDS", "600"))
 
-# Tiered l2ping scheduler configuration
-ACTIVE_TIER_MAX = int(os.getenv("ACTIVE_TIER_MAX", "20"))
-WARM_TIER_BATCH = int(os.getenv("WARM_TIER_BATCH", "5"))
-COLD_TIER_BATCH = int(os.getenv("COLD_TIER_BATCH", "3"))
-WARM_TIER_THRESHOLD_SECONDS = int(os.getenv("WARM_TIER_THRESHOLD_SECONDS", "600"))
-
 # Track devices that failed to register, so we retry them
 failed_registrations: set[str] = set()
 
 # Track previous status of each device for deduplication
 device_previous_status: dict[str, str] = {}
 
-# Track the last time we recorded any positive signal per device
+# Track the last time we recorded any positive signal per device (for logging)
 last_presence_signal: dict[str, float] = {}
-
-# Track per-device signal diagnostics and flapping metadata
-device_signal_stats: dict[str, dict[str, Any]] = {}
-status_transition_history: dict[str, deque[float]] = {}
-device_freeze_until: dict[str, float] = {}
 
 # Manual override cache
 _override_cache: dict[str, Any] = {
@@ -160,88 +136,6 @@ def _convex_call(fn, timeout: float | None = None):
         return None
 
 
-class DeviceScheduler:
-    """Tiered l2ping scheduler that limits per-cycle work.
-
-    Devices are split into three tiers based on how long they have been absent:
-
-    * **Active** — present within the last ``PRESENT_TTL_SECONDS``.  Checked
-      every cycle (up to ``ACTIVE_TIER_MAX``).
-    * **Warm** — absent for less than ``WARM_TIER_THRESHOLD_SECONDS``.  A
-      rotating batch of ``WARM_TIER_BATCH`` is checked each cycle.
-    * **Cold** — absent longer than the warm threshold.  A rotating batch of
-      ``COLD_TIER_BATCH`` is checked each cycle.
-
-    Devices that are already confirmed connected (via ``bluetoothctl devices
-    Connected``) are **never** l2pinged — they are automatically treated as
-    present.
-    """
-
-    def __init__(self) -> None:
-        self._warm_offset = 0
-        self._cold_offset = 0
-
-    def select(
-        self,
-        registered_macs: set[str],
-        pending_macs: set[str],
-        connected_set: set[str],
-        now: float,
-    ) -> list[str]:
-        """Return the ordered list of MACs to l2ping this cycle (sequential)."""
-
-        # Probe ALL devices including connected ones.
-        candidates = registered_macs | pending_macs
-
-        active: list[str] = []
-        warm: list[str] = []
-        cold: list[str] = []
-
-        for mac in sorted(candidates):
-            last_ts = last_presence_signal.get(mac)
-            if last_ts is None:
-                cold.append(mac)
-                continue
-            age = now - last_ts
-            if age <= PRESENT_TTL_SECONDS:
-                active.append(mac)
-            elif age <= WARM_TIER_THRESHOLD_SECONDS:
-                warm.append(mac)
-            else:
-                cold.append(mac)
-
-        # Cap active tier
-        selected = active[:ACTIVE_TIER_MAX]
-
-        # Rotate through warm tier
-        if warm:
-            batch = WARM_TIER_BATCH
-            start = self._warm_offset % len(warm)
-            selected += (warm + warm)[start : start + batch]
-            self._warm_offset = (start + batch) % max(1, len(warm))
-
-        # Rotate through cold tier
-        if cold:
-            batch = COLD_TIER_BATCH
-            start = self._cold_offset % len(cold)
-            selected += (cold + cold)[start : start + batch]
-            self._cold_offset = (start + batch) % max(1, len(cold))
-
-        logger.info(
-            "DeviceScheduler: active=%d warm=%d/%d cold=%d/%d → probing %d",
-            len(active),
-            min(WARM_TIER_BATCH, len(warm)),
-            len(warm),
-            min(COLD_TIER_BATCH, len(cold)),
-            len(cold),
-            len(selected),
-        )
-        return selected
-
-
-_device_scheduler = DeviceScheduler()
-
-
 def _prune_device_state(known_macs: set[str]) -> None:
     """Remove cached state for devices that are no longer tracked."""
 
@@ -252,18 +146,6 @@ def _prune_device_state(known_macs: set[str]) -> None:
     for mac in list(last_presence_signal.keys()):
         if mac not in known_macs:
             last_presence_signal.pop(mac, None)
-
-    for mac in list(device_signal_stats.keys()):
-        if mac not in known_macs:
-            device_signal_stats.pop(mac, None)
-
-    for mac in list(status_transition_history.keys()):
-        if mac not in known_macs:
-            status_transition_history.pop(mac, None)
-
-    for mac in list(device_freeze_until.keys()):
-        if mac not in known_macs:
-            device_freeze_until.pop(mac, None)
 
 
 def _init_fast_path_queue() -> None:
@@ -326,7 +208,6 @@ def _handle_fast_path_payload(payload: Any) -> None:
         _fast_path_recent_events[mac] = now
 
     last_presence_signal[mac] = now
-    _update_signal_stats(mac, True, "fast_path", now)
 
     name = payload.get("name")
     device = get_device_by_mac(mac)
@@ -402,108 +283,18 @@ def _get_device_overrides(now: float | None = None) -> dict[str, Any]:
     return overrides
 
 
-def _update_signal_stats(mac: str, success: bool, source: str | None, timestamp: float) -> None:
-    stats = device_signal_stats.setdefault(
-        mac,
-        {
-            "consecutive_hits": 0,
-            "consecutive_misses": 0,
-            "last_signal_ts": 0.0,
-            "last_signal_source": None,
-        },
-    )
-
-    if success:
-        stats["consecutive_hits"] += 1
-        stats["consecutive_misses"] = 0
-        stats["last_signal_ts"] = timestamp
-        stats["last_signal_source"] = source
-    else:
-        stats["consecutive_misses"] += 1
-        stats["consecutive_hits"] = 0
-
-
-def _record_status_transition(mac: str, previous_status: str | None, new_status: str, now: float) -> None:
-    if previous_status is None or previous_status == new_status:
-        return
-
-    history = status_transition_history.setdefault(mac, deque())
-    history.append(now)
-    window = max(10, FLAP_MONITOR_WINDOW_SECONDS)
-    while history and now - history[0] > window:
-        history.popleft()
-
-    transitions = len(history)
-    if transitions >= max(1, FLAP_ALERT_THRESHOLD):
-        logger.warning(
-            "Device %s flapped %s times in the last %ss (prev=%s -> new=%s)",
-            mac,
-            transitions,
-            window,
-            previous_status,
-            new_status,
-        )
-        if ENABLE_AUTO_FREEZE_ON_FLAP and AUTO_FREEZE_DURATION_SECONDS > 0:
-            freeze_until = now + AUTO_FREEZE_DURATION_SECONDS
-            prior_freeze = device_freeze_until.get(mac, 0.0)
-            if freeze_until > prior_freeze:
-                device_freeze_until[mac] = freeze_until
-                logger.warning(
-                    "Freezing device %s status updates until %s",
-                    mac,
-                    datetime.fromtimestamp(freeze_until).isoformat(),
-                )
-
-
-def _log_device_diagnostics(
-    mac: str,
-    device: dict[str, Any],
-    now: float,
-    desired_present: bool,
-    overrides: dict[str, Any],
-    decision_reason: Optional[str] = None,
-) -> None:
-    if not ENABLE_DEVICE_DIAGNOSTICS:
-        return
-
-    stats = device_signal_stats.get(mac, {})
-    override_note = None
-    norm_mac = _normalize_mac(mac)
-    if norm_mac in overrides.get("quarantine", set()):
-        override_note = "quarantine"
-    elif overrides.get("force_status", {}).get(norm_mac):
-        override_note = f"force={overrides['force_status'][norm_mac]}"
-
-    diag = {
-        "mac": mac,
-        "user": device.get("name") or mac,
-        "convex_status": device.get("status"),
-        "desired": "present" if desired_present else "absent",
-        "last_signal_age_s": round(now - last_presence_signal.get(mac, 0.0), 1)
-        if mac in last_presence_signal
-        else None,
-        "last_signal_source": stats.get("last_signal_source"),
-        "hits": stats.get("consecutive_hits"),
-        "misses": stats.get("consecutive_misses"),
-    }
-
-    freeze_until = device_freeze_until.get(mac)
-    if freeze_until and freeze_until > now:
-        diag["freeze_until"] = datetime.fromtimestamp(freeze_until).isoformat()
-    if override_note:
-        diag["override"] = override_note
-    if decision_reason:
-        diag["decision"] = decision_reason
-
-    logger.info("Device diagnostics: %s", diag)
-
-
 def _compute_presence_decision(
     mac: str,
-    now: float,
-    previous_status: Optional[str],
+    detected_this_cycle: bool,
     overrides: dict[str, Any],
 ) -> tuple[bool, str]:
+    """Decide whether *mac* should be marked present or absent.
+
+    Logic is intentionally simple:
+    1. Quarantine override → absent.
+    2. Force-status override → forced value.
+    3. Otherwise use the current cycle's probe result directly.
+    """
     norm_mac = _normalize_mac(mac)
     if norm_mac in overrides.get("quarantine", set()):
         return False, "quarantine"
@@ -512,29 +303,7 @@ def _compute_presence_decision(
     if forced_status:
         return forced_status == "present", f"force:{forced_status}"
 
-    freeze_until = device_freeze_until.get(mac, 0.0)
-    if freeze_until and freeze_until > now and previous_status is not None:
-        return previous_status == "present", "frozen"
-
-    last_signal_ts = last_presence_signal.get(mac)
-    signal_age = float("inf") if last_signal_ts is None else now - last_signal_ts
-    within_ttl = signal_age <= PRESENT_TTL_SECONDS
-
-    if within_ttl:
-        return True, "ttl"
-
-    if not ENABLE_ADAPTIVE_HYSTERESIS:
-        return False, "ttl_expired"
-
-    stats = device_signal_stats.get(mac, {})
-    if previous_status == "present":
-        misses = stats.get("consecutive_misses", 0)
-        hold_elapsed = signal_age >= ABSENCE_HOLD_SECONDS
-        threshold_met = misses >= ABSENCE_CONSECUTIVE_MISS_THRESHOLD
-        if not (hold_elapsed and threshold_met):
-            return True, "absence_hold"
-
-    return False, "adaptive_absent"
+    return detected_this_cycle, "probe"
 
 
 def get_known_devices() -> list[dict[str, Any]]:
@@ -904,8 +673,6 @@ def update_device_status(
         device_previous_status[mac_address] = new_status
         return True
 
-    _record_status_transition(mac_address, previous_status, new_status, time.time())
-
     result = _convex_call(
         lambda: get_convex_client().mutation(
             "devices:updateDeviceStatus",
@@ -931,15 +698,16 @@ def update_device_status(
 
 
 def check_and_update_devices() -> None:
-    """Run one auto-tracking cycle using tiered l2ping detection.
+    """Run one presence-tracking cycle.
 
     Flow:
     1. Snapshot connected devices (instant).
-    2. Record connected devices as present, then disconnect them to free ACL slots.
+    2. Record connected devices as present, then disconnect to free ACL slots.
     3. Fetch Convex device list (cached for the cycle).
-    4. Use DeviceScheduler to pick which MACs to l2ping.
-    5. Run l2ping_batch (sequential, disconnect-after-success).
-    6. Compute presence decisions and push status updates to Convex.
+    4. Probe ALL registered/pending devices not already connected via
+       l2ping → connect-probe fallback (sequential).
+    5. Determine presence: connected OR probe succeeded → present, else absent.
+    6. Push status updates to Convex.
     7. Housekeeping (cleanup expired, stale pairings, failed pairings).
     """
 
@@ -959,7 +727,6 @@ def check_and_update_devices() -> None:
     # -- 2. Record presence signal for connected devices, then disconnect ----
     for mac in connected_set:
         last_presence_signal[mac] = now
-        _update_signal_stats(mac, True, "connected", now)
 
     # Disconnect all connected devices immediately to free ACL slots for l2ping
     if connected_set:
@@ -992,52 +759,49 @@ def check_and_update_devices() -> None:
     _retry_unpublished_devices(now, device_map, registered_macs, pending_macs)
     overrides = _get_device_overrides(now)
 
-    # -- 4. Tiered l2ping scheduling ----------------------------------------
-    l2ping_targets = _device_scheduler.select(
-        registered_macs, pending_macs, connected_set, now,
-    )
+    # -- 4. Probe ALL registered + pending devices (skip already-connected) --
+    all_trackable = registered_macs | pending_macs
+    l2ping_targets = sorted(all_trackable - connected_set)
 
-    # -- 5. Run l2ping sequentially (no threading — avoids HCI contention) --
     l2ping_results: dict[str, bool] = {}
     if l2ping_targets:
+        logger.info("Probing %d device(s) via l2ping + connect-probe...", len(l2ping_targets))
         l2ping_results = bluetooth_scanner.l2ping_batch(l2ping_targets)
     else:
-        logger.info("No devices selected for l2ping this cycle")
+        logger.info("No devices to probe this cycle")
 
-    # Update signal stats for probed devices
-    for mac in l2ping_targets:
-        success = l2ping_results.get(mac, False)
-        _update_signal_stats(mac, success, "l2ping" if success else None, now)
-
-    presence_signals = {mac for mac, ok in l2ping_results.items() if ok}
-    for mac in presence_signals:
-        last_presence_signal[mac] = now
+    # Record signal timestamps for devices that responded
+    for mac, ok in l2ping_results.items():
+        if ok:
+            last_presence_signal[mac] = now
 
     logger.info(
-        "l2ping detected %d/%d device(s) in range",
-        len(presence_signals),
+        "Probe results: %d/%d device(s) responded",
+        sum(1 for ok in l2ping_results.values() if ok),
         len(l2ping_targets),
     )
 
+    # -- 5. Build the set of devices detected this cycle --------------------
+    #    detected = was connected at snapshot OR responded to probe
+    detected_this_cycle: set[str] = set(connected_set)
+    for mac, ok in l2ping_results.items():
+        if ok:
+            detected_this_cycle.add(mac)
+
     # -- 6. Compute presence decisions and push updates ----------------------
     desired_presence: dict[str, bool] = {}
-    decision_reasons: dict[str, str] = {}
     for mac in registered_macs:
-        device = device_map.get(mac, {})
-        previous_status = device_previous_status.get(mac) or device.get("status")
         desired_present, reason = _compute_presence_decision(
-            mac, now, previous_status, overrides,
+            mac, mac in detected_this_cycle, overrides,
         )
         desired_presence[mac] = desired_present
-        decision_reasons[mac] = reason
-        _log_device_diagnostics(mac, device, now, desired_present, overrides, reason)
+        logger.debug("Device %s -> %s (%s)", mac, "present" if desired_present else "absent", reason)
 
     present_set = {mac for mac, is_present in desired_presence.items() if is_present}
     logger.info(
-        "Decision engine -> %d/%d registered device(s) marked present (adaptive=%s)",
+        "%d/%d registered device(s) marked present",
         len(present_set),
         len(registered_macs),
-        ENABLE_ADAPTIVE_HYSTERESIS,
     )
 
     # Register newly-connected devices that aren't in Convex yet
@@ -1151,19 +915,14 @@ def run_presence_tracker() -> None:
     Main polling loop for the presence tracker.
 
     Runs continuously, checking device connection status and updating
-    Convex as needed.  Uses tiered l2ping scheduling to keep cycle time
-    well within the polling interval even with 50+ registered devices.
+    Convex as needed.  Every cycle probes all registered devices via
+    l2ping → connect-probe fallback (sequential).
     """
     _kill_stale_bt_processes()
 
     logger.info("Starting Presence Tracker")
     logger.info("Polling interval: %ds", POLLING_INTERVAL)
     logger.info("Grace period for new devices: %ds", GRACE_PERIOD_SECONDS)
-    logger.info("Presence TTL: %ds", PRESENT_TTL_SECONDS)
-    logger.info(
-        "Tiered scheduler: active_max=%d warm_batch=%d cold_batch=%d warm_threshold=%ds (sequential l2ping)",
-        ACTIVE_TIER_MAX, WARM_TIER_BATCH, COLD_TIER_BATCH, WARM_TIER_THRESHOLD_SECONDS,
-    )
     logger.info("Convex query timeout: %ds", CONVEX_QUERY_TIMEOUT)
 
     _init_fast_path_queue()
