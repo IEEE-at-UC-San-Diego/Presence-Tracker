@@ -21,15 +21,8 @@ L2PING_COUNT = int(os.getenv("L2PING_COUNT", "1"))
 CONNECT_TIMEOUT_SECONDS = int(os.getenv("CONNECT_TIMEOUT_SECONDS", "10"))
 
 # Connect-probe fallback (sequential): quick connect attempt for devices
-# that ignore l2ping.  Runs after l2ping in the same sequential batch.
-CONNECT_PROBE_FALLBACK = os.getenv("CONNECT_PROBE_FALLBACK", "true").lower() in ("1", "true", "yes", "on")
+# that fail l2ping.  Runs after all l2pings complete.
 CONNECT_PROBE_TIMEOUT_SECONDS = int(os.getenv("CONNECT_PROBE_TIMEOUT_SECONDS", "3"))
-CONNECT_PROBE_MAX_PER_BATCH = int(os.getenv("CONNECT_PROBE_MAX_PER_BATCH", "2"))
-
-# After this many consecutive l2ping failures a device is flagged as
-# "l2ping-resistant" and future batches skip l2ping for it, going
-# straight to connect_probe.  A single l2ping success resets the counter.
-L2PING_RESIST_THRESHOLD = int(os.getenv("L2PING_RESIST_THRESHOLD", "3"))
 
 # Cache TTL for bluetoothctl info calls (seconds)
 DEVICE_INFO_CACHE_SECONDS = int(os.getenv("DEVICE_INFO_CACHE_SECONDS", "5"))
@@ -81,23 +74,6 @@ class DeviceInfoCache:
 
 
 _device_info_cache = DeviceInfoCache(DEVICE_INFO_CACHE_SECONDS)
-
-# Tracks consecutive l2ping failures per MAC.
-_l2ping_fail_count: dict[str, int] = {}
-
-
-def _record_l2ping_result(mac: str, success: bool) -> None:
-    """Update the consecutive-failure counter for *mac*."""
-    if success:
-        _l2ping_fail_count.pop(mac, None)
-    else:
-        _l2ping_fail_count[mac] = _l2ping_fail_count.get(mac, 0) + 1
-
-
-def is_l2ping_resistant(mac: str) -> bool:
-    """Return True if *mac* has failed l2ping enough times to skip it."""
-    return _l2ping_fail_count.get(mac, 0) >= L2PING_RESIST_THRESHOLD
-
 
 logger.info(
     "Bluetooth scanner config -> connect_timeout=%ss, l2ping_timeout=%ss, "
@@ -230,18 +206,19 @@ def run_l2ping_cycle(mac_addresses: list[str]) -> dict[str, bool]:
 def l2ping_batch(
     mac_addresses: list[str],
     max_count: int | None = None,
-    disconnect_after: bool = True,
 ) -> dict[str, bool]:
-    """l2ping a subset of MACs sequentially, optionally disconnecting after each success.
+    """Probe devices sequentially: l2ping each, then connect-probe failures.
+
+    All probing is sequential — only one l2ping / connect process runs at
+    a time to avoid HCI contention.  Every device is disconnected at the
+    end regardless of result.
 
     Args:
-        mac_addresses: Full list of MACs to probe.
+        mac_addresses: MACs to probe.
         max_count: If set, only probe the first *max_count* MACs.
-        disconnect_after: If True, disconnect each device immediately after a
-            successful l2ping to free the ACL slot for the next device.
 
     Returns:
-        Dict mapping each probed MAC to its result (True = responded).
+        Dict mapping each probed MAC to True (present) or False (absent).
     """
     if max_count is not None and max_count > 0:
         mac_addresses = mac_addresses[:max_count]
@@ -254,63 +231,40 @@ def l2ping_batch(
 
     results: dict[str, bool] = {}
     successes = 0
-    probe_candidates: list[str] = []  # need connect-probe
+    l2ping_failures: list[str] = []
 
-    # Phase 1: l2ping (skip l2ping-resistant devices)
+    # Phase 1: l2ping every device sequentially
     for mac in mac_addresses:
-        if is_l2ping_resistant(mac):
-            probe_candidates.append(mac)
-            continue
         success = l2ping_device(mac)
-        _record_l2ping_result(mac, success)
         results[mac] = success
         if success:
             successes += 1
-            if disconnect_after:
-                disconnect_device(mac)
         else:
-            probe_candidates.append(mac)
+            l2ping_failures.append(mac)
 
-    # Phase 2: sequential connect-probe for failures + resistant devices
-    # Prioritise l2ping-resistant devices — they're the ones that actually
-    # need connect-probe.  New failures go after them.
-    probe_candidates.sort(key=lambda m: (0 if is_l2ping_resistant(m) else 1))
-    fallback_hits = 0
-    fallback_tried = 0
-    if CONNECT_PROBE_FALLBACK and probe_candidates:
-        for mac in probe_candidates:
-            if fallback_tried >= CONNECT_PROBE_MAX_PER_BATCH:
-                results.setdefault(mac, False)
-                continue
-            fallback_tried += 1
-            success = connect_probe(mac)
-            # Only increment failure count — never reset on connect-probe
-            # success so the device stays flagged as l2ping-resistant.
-            if not success:
-                _record_l2ping_result(mac, False)
-            results[mac] = success
-            if success:
-                fallback_hits += 1
-                successes += 1
-                if disconnect_after:
-                    disconnect_device(mac)
-    else:
-        for mac in probe_candidates:
-            results.setdefault(mac, False)
+    # Phase 2: connect-probe every l2ping failure
+    probe_hits = 0
+    for mac in l2ping_failures:
+        success = connect_probe(mac)
+        if success:
+            results[mac] = True
+            successes += 1
+            probe_hits += 1
+
+    # Phase 3: disconnect ALL devices to free ACL slots
+    for mac in mac_addresses:
+        disconnect_device(mac)
 
     duration = time.perf_counter() - start
-    fallback_msg = ""
-    if fallback_tried:
-        fallback_msg = " (connect-probe: %d/%d)" % (fallback_hits, fallback_tried)
-    resistant = sum(1 for m in mac_addresses if is_l2ping_resistant(m))
-    if resistant:
-        fallback_msg += " [%d l2ping-resistant]" % resistant
+    probe_msg = ""
+    if l2ping_failures:
+        probe_msg = " (connect-probe: %d/%d)" % (probe_hits, len(l2ping_failures))
     logger.info(
         "l2ping_batch complete: %d/%d responded in %.2fs%s",
         successes,
         len(results),
         duration,
-        fallback_msg,
+        probe_msg,
     )
     return results
 

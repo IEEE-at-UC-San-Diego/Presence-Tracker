@@ -202,8 +202,8 @@ class DeviceScheduler:
     ) -> list[str]:
         """Return the ordered list of MACs to l2ping this cycle (sequential)."""
 
-        # Never l2ping devices that are already connected — they are present.
-        candidates = (registered_macs | pending_macs) - connected_set
+        # Probe ALL devices including connected ones.
+        candidates = registered_macs | pending_macs
 
         active: list[str] = []
         warm: list[str] = []
@@ -240,13 +240,12 @@ class DeviceScheduler:
             self._cold_offset = (start + batch) % max(1, len(cold))
 
         logger.info(
-            "DeviceScheduler: active=%d warm=%d/%d cold=%d/%d connected=%d (skipped) → probing %d",
+            "DeviceScheduler: active=%d warm=%d/%d cold=%d/%d → probing %d",
             len(active),
             min(WARM_TIER_BATCH, len(warm)),
             len(warm),
             min(COLD_TIER_BATCH, len(cold)),
             len(cold),
-            len(connected_set & (registered_macs | pending_macs)),
             len(selected),
         )
         return selected
@@ -1027,9 +1026,7 @@ def check_and_update_devices() -> None:
     # -- 5. Run l2ping sequentially (no threading — avoids HCI contention) --
     l2ping_results: dict[str, bool] = {}
     if l2ping_targets:
-        l2ping_results = bluetooth_scanner.l2ping_batch(
-            l2ping_targets, disconnect_after=True,
-        )
+        l2ping_results = bluetooth_scanner.l2ping_batch(l2ping_targets)
     else:
         logger.info("No devices selected for l2ping this cycle")
 
