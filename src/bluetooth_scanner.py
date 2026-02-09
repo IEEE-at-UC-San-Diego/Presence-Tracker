@@ -284,7 +284,10 @@ def l2ping_batch(
                 continue
             fallback_tried += 1
             success = connect_probe(mac)
-            _record_l2ping_result(mac, success)
+            # Only increment failure count — never reset on connect-probe
+            # success so the device stays flagged as l2ping-resistant.
+            if not success:
+                _record_l2ping_result(mac, False)
             results[mac] = success
             if success:
                 fallback_hits += 1
