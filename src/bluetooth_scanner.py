@@ -26,6 +26,12 @@ CONNECT_TIMEOUT_SECONDS = int(os.getenv("CONNECT_TIMEOUT_SECONDS", "10"))
 # but briefly show Connected: yes on a connect attempt, confirming presence.
 CONNECT_PROBE_FALLBACK = os.getenv("CONNECT_PROBE_FALLBACK", "true").lower() in ("1", "true", "yes", "on")
 CONNECT_PROBE_TIMEOUT_SECONDS = int(os.getenv("CONNECT_PROBE_TIMEOUT_SECONDS", "3"))
+CONNECT_PROBE_MAX_PER_BATCH = int(os.getenv("CONNECT_PROBE_MAX_PER_BATCH", "2"))
+
+# After this many consecutive l2ping failures a device is flagged as
+# "l2ping-resistant" and future probes skip l2ping, going straight to
+# connect_probe.  A single l2ping success resets the counter.
+L2PING_RESIST_THRESHOLD = int(os.getenv("L2PING_RESIST_THRESHOLD", "3"))
 
 # Cache TTL for bluetoothctl info calls (seconds)
 DEVICE_INFO_CACHE_SECONDS = int(os.getenv("DEVICE_INFO_CACHE_SECONDS", "5"))
@@ -81,6 +87,26 @@ _device_info_cache = DeviceInfoCache(DEVICE_INFO_CACHE_SECONDS)
 # Serialises bluetoothctl disconnect calls so parallel l2ping threads
 # don't issue overlapping commands to the BlueZ daemon.
 _disconnect_lock = Lock()
+
+# Tracks consecutive l2ping failures per MAC.  Once a device exceeds
+# L2PING_RESIST_THRESHOLD it is probed via connect_probe instead.
+_l2ping_fail_count: dict[str, int] = {}
+_l2ping_fail_lock = Lock()
+
+
+def _record_l2ping_result(mac: str, success: bool) -> None:
+    """Update the consecutive-failure counter for *mac*."""
+    with _l2ping_fail_lock:
+        if success:
+            _l2ping_fail_count.pop(mac, None)
+        else:
+            _l2ping_fail_count[mac] = _l2ping_fail_count.get(mac, 0) + 1
+
+
+def is_l2ping_resistant(mac: str) -> bool:
+    """Return True if *mac* has failed l2ping enough times to skip it."""
+    with _l2ping_fail_lock:
+        return _l2ping_fail_count.get(mac, 0) >= L2PING_RESIST_THRESHOLD
 
 logger.info(
     "Bluetooth scanner config -> connect_timeout=%ss, l2ping_timeout=%ss, "
@@ -239,35 +265,51 @@ def l2ping_batch(
 
     results: dict[str, bool] = {}
     successes = 0
-    l2ping_failures: list[str] = []
+    probe_candidates: list[str] = []  # devices that need connect-probe
 
-    # Phase 1: l2ping all devices
+    # Phase 1: l2ping (skip l2ping-resistant devices)
     for mac in mac_addresses:
+        if is_l2ping_resistant(mac):
+            # Skip l2ping entirely — go straight to connect-probe later
+            probe_candidates.append(mac)
+            continue
         success = l2ping_device(mac)
+        _record_l2ping_result(mac, success)
         results[mac] = success
         if success:
             successes += 1
             if disconnect_after:
                 disconnect_device(mac)
         else:
-            l2ping_failures.append(mac)
+            probe_candidates.append(mac)
 
-    # Phase 2: connect-probe fallback for l2ping failures
+    # Phase 2: connect-probe for failures + l2ping-resistant devices
     fallback_hits = 0
-    if CONNECT_PROBE_FALLBACK and l2ping_failures:
-        for mac in l2ping_failures:
+    fallback_tried = 0
+    if CONNECT_PROBE_FALLBACK and probe_candidates:
+        for mac in probe_candidates:
+            if fallback_tried >= CONNECT_PROBE_MAX_PER_BATCH:
+                # Cap reached — mark remaining as not-seen
+                results.setdefault(mac, False)
+                continue
+            fallback_tried += 1
             success = connect_probe(mac)
+            _record_l2ping_result(mac, success)  # reset counter on success
+            results[mac] = success
             if success:
                 fallback_hits += 1
-                results[mac] = True
                 successes += 1
                 if disconnect_after:
                     disconnect_device(mac)
+    else:
+        # No fallback — mark probe_candidates as failed
+        for mac in probe_candidates:
+            results.setdefault(mac, False)
 
     duration = time.perf_counter() - start
     fallback_msg = ""
-    if l2ping_failures and CONNECT_PROBE_FALLBACK:
-        fallback_msg = " (connect-probe: %d/%d)" % (fallback_hits, len(l2ping_failures))
+    if fallback_tried:
+        fallback_msg = " (connect-probe: %d/%d)" % (fallback_hits, fallback_tried)
     logger.info(
         "l2ping_batch complete: %d/%d responded in %.2fs%s",
         successes,
