@@ -24,4 +24,11 @@ crons.cron(
   {},
 );
 
+crons.interval(
+  "compactAttendanceLogs",
+  { minutes: 5 },
+  internal.devices.compactAttendanceLogs,
+  {},
+);
+
 export default crons;

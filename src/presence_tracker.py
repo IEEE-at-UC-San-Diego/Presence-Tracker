@@ -78,7 +78,7 @@ device_previous_status: dict[str, str] = {}
 
 # Track consecutive absent probe misses per device.
 # A device must miss ABSENT_THRESHOLD consecutive cycles before being marked absent.
-ABSENT_THRESHOLD = int(os.getenv("ABSENT_THRESHOLD", "2"))
+ABSENT_THRESHOLD = int(os.getenv("ABSENT_THRESHOLD", "3"))
 consecutive_misses: dict[str, int] = {}
 
 # Track the last time we recorded any positive signal per device (for logging)

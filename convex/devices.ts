@@ -194,36 +194,6 @@ export const updateDeviceStatus = mutation({
     // If absent, we can keep it or clear it. Usually we keep it for "Connected at X", but if absent "Last Seen Y".
     // When showing "Connected at", we use connectedSince.
 
-    // Log status change if meaningful (e.g. absent <-> present)
-    // Check for duplicate status change logs within the last 10 seconds to prevent race conditions
-    if (existingDevice.status !== args.status) {
-      const tenSecondsAgo = now - 10000;
-      const recentLogs = await ctx.db
-        .query("deviceLogs")
-        .withIndex("by_deviceId", (q) => q.eq("deviceId", existingDevice._id))
-        .filter((q) => 
-          q.and(
-            q.eq(q.field("changeType"), "status_change"),
-            q.gte(q.field("timestamp"), tenSecondsAgo)
-          )
-        )
-        .collect();
-
-      const isDuplicate = recentLogs.some((log: any) => 
-        log.details.includes(`from ${existingDevice.status} to ${args.status}`) ||
-        log.details.includes(`from ${args.status} to ${existingDevice.status}`)
-      );
-
-      if (!isDuplicate) {
-        await ctx.db.insert("deviceLogs", {
-          deviceId: existingDevice._id,
-          changeType: "status_change",
-          timestamp: now,
-          details: `Status changed from ${existingDevice.status} to ${args.status}`
-        });
-      }
-    }
-
     await ctx.db.patch(existingDevice._id, {
       status: args.status,
       lastSeen: now,
@@ -528,3 +498,89 @@ export const cleanupOldLogs = internalMutation({
     return { deletedCount: oldLogs.length };
   },
 });
+
+// Compact attendance logs by removing rapid flip-flop noise.
+// Phase 1: Find A→B→A triplets where the middle entry B is a brief blip
+//          (both transitions within COMPACT_WINDOW_MS). Remove B and the
+//          duplicate A, keeping the first A. Repeat until stable.
+// Phase 2: Deduplicate any consecutive same-status entries that remain,
+//          keeping only the earliest one.
+const COMPACT_WINDOW_MS = 2.5 * 60 * 1000; // 2.5 minutes
+
+export const compactAttendanceLogs = internalMutation({
+  args: {},
+  handler: async (ctx) => {
+    const allLogs = await ctx.db
+      .query("attendanceLogs")
+      .withIndex("by_timestamp")
+      .order("asc")
+      .collect();
+
+    // Group logs by userId
+    const logsByUser = new Map<string, typeof allLogs>();
+    for (const log of allLogs) {
+      const existing = logsByUser.get(log.userId) || [];
+      existing.push(log);
+      logsByUser.set(log.userId, existing);
+    }
+
+    const idsToDelete = new Set<string>();
+
+    for (const [_userId, userLogs] of logsByUser) {
+      let logs = [...userLogs];
+
+      // Phase 1: Remove rapid flip-flop noise.
+      // Scan for adjacent opposite-status pairs within COMPACT_WINDOW_MS.
+      // Only remove a pair if there's an anchor entry before it (so we
+      // don't delete the baseline state). The anchor must have the same
+      // status as the entry after the pair, preserving alternation.
+      let changed = true;
+      while (changed) {
+        changed = false;
+        const kept: typeof logs = [];
+
+        for (let i = 0; i < logs.length; i++) {
+          const prev = kept.length > 0 ? kept[kept.length - 1] : null;
+
+          if (prev && prev.status !== logs[i].status) {
+            const gap = logs[i].timestamp - prev.timestamp;
+            if (gap <= COMPACT_WINDOW_MS && kept.length >= 2) {
+              // There's an anchor before prev. Remove prev and this entry
+              // (the rapid reversal pair). The anchor remains.
+              kept.pop();
+              idsToDelete.add(prev._id);
+              idsToDelete.add(logs[i]._id);
+              changed = true;
+              continue;
+            }
+          }
+
+          kept.push(logs[i]);
+        }
+
+        logs = kept;
+      }
+
+      // Phase 2: Deduplicate consecutive same-status entries
+      for (let i = 1; i < logs.length; i++) {
+        if (logs[i].status === logs[i - 1].status) {
+          // Keep the earlier one, delete the later duplicate
+          idsToDelete.add(logs[i]._id);
+        }
+      }
+    }
+
+    let deletedCount = 0;
+    for (const id of idsToDelete) {
+      await ctx.db.delete(id as any);
+      deletedCount++;
+    }
+
+    if (deletedCount > 0) {
+      console.log(`[compactAttendanceLogs] Removed ${deletedCount} redundant flip-flop log entries`);
+    }
+
+    return { deletedCount };
+  },
+});
+
