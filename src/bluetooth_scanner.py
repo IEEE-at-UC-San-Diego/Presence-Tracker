@@ -605,9 +605,6 @@ def disconnect_device(mac_address: str) -> bool:
     """
     Disconnect from a Bluetooth device.
 
-    Thread-safe: uses ``_disconnect_lock`` so parallel l2ping threads
-    don't issue overlapping ``bluetoothctl disconnect`` commands.
-
     Args:
         mac_address: The MAC address of the device to disconnect
 
@@ -618,35 +615,34 @@ def disconnect_device(mac_address: str) -> bool:
         logger.error(f"Invalid MAC address format: {mac_address}")
         return False
     
-    with _disconnect_lock:
-        try:
-            logger.info(f"Disconnecting from {mac_address}...")
-            result = subprocess.run(
-                ["bluetoothctl", "disconnect", mac_address],
-                capture_output=True,
-                text=True,
-                timeout=10,
-            )
+    try:
+        logger.info(f"Disconnecting from {mac_address}...")
+        result = subprocess.run(
+            ["bluetoothctl", "disconnect", mac_address],
+            capture_output=True,
+            text=True,
+            timeout=10,
+        )
 
-            if "Successful disconnected" in result.stdout:
-                logger.info(f"Successfully disconnected from {mac_address}")
-                return True
+        if "Successful disconnected" in result.stdout:
+            logger.info(f"Successfully disconnected from {mac_address}")
+            return True
+        else:
+            # Don't trust cache - verify directly with fresh check
+            is_connected = _bluetoothctl_info(mac_address)
+            if is_connected and "Connected: yes" in is_connected:
+                logger.debug(f"Could not disconnect from {mac_address}: {result.stdout.strip()}")
+                return False
             else:
-                # Don't trust cache - verify directly with fresh check
-                is_connected = _bluetoothctl_info(mac_address)
-                if is_connected and "Connected: yes" in is_connected:
-                    logger.debug(f"Could not disconnect from {mac_address}: {result.stdout.strip()}")
-                    return False
-                else:
-                    logger.info(f"Device {mac_address} already disconnected")
-                    return True
+                logger.info(f"Device {mac_address} already disconnected")
+                return True
 
-        except subprocess.TimeoutExpired:
-            logger.warning(f"Timeout disconnecting from {mac_address}")
-            return False
-        except Exception as e:
-            logger.error(f"Error disconnecting from device {mac_address}: {e}")
-            return False
+    except subprocess.TimeoutExpired:
+        logger.warning(f"Timeout disconnecting from {mac_address}")
+        return False
+    except Exception as e:
+        logger.error(f"Error disconnecting from device {mac_address}: {e}")
+        return False
 
 
 def remove_device(mac_address: str) -> bool:

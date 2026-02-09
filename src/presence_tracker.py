@@ -1045,7 +1045,7 @@ def check_and_update_devices() -> None:
     logger.info(
         "l2ping detected %d/%d device(s) in range",
         len(presence_signals),
-        len(all_l2ping_targets),
+        len(l2ping_targets),
     )
 
     # -- 6. Compute presence decisions and push updates ----------------------
