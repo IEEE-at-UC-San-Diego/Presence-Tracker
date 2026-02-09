@@ -233,16 +233,17 @@ def l2ping_batch(
     successes = 0
     l2ping_failures: list[str] = []
 
-    # Phase 1: l2ping every device sequentially
+    # Phase 1: l2ping every device sequentially, disconnect after each
     for mac in mac_addresses:
         success = l2ping_device(mac)
         results[mac] = success
         if success:
             successes += 1
+            disconnect_device(mac)
         else:
             l2ping_failures.append(mac)
 
-    # Phase 2: connect-probe every l2ping failure
+    # Phase 2: connect-probe every l2ping failure, disconnect immediately
     probe_hits = 0
     for mac in l2ping_failures:
         success = connect_probe(mac)
@@ -250,9 +251,6 @@ def l2ping_batch(
             results[mac] = True
             successes += 1
             probe_hits += 1
-
-    # Phase 3: disconnect ALL devices to free ACL slots
-    for mac in mac_addresses:
         disconnect_device(mac)
 
     duration = time.perf_counter() - start
