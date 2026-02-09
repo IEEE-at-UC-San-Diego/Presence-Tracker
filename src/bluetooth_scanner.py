@@ -272,6 +272,9 @@ def l2ping_batch(
             probe_candidates.append(mac)
 
     # Phase 2: sequential connect-probe for failures + resistant devices
+    # Prioritise l2ping-resistant devices — they're the ones that actually
+    # need connect-probe.  New failures go after them.
+    probe_candidates.sort(key=lambda m: (0 if is_l2ping_resistant(m) else 1))
     fallback_hits = 0
     fallback_tried = 0
     if CONNECT_PROBE_FALLBACK and probe_candidates:
