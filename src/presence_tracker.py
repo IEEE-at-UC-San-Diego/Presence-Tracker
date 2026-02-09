@@ -76,6 +76,11 @@ failed_registrations: set[str] = set()
 # Track previous status of each device for deduplication
 device_previous_status: dict[str, str] = {}
 
+# Track consecutive absent probe misses per device.
+# A device must miss ABSENT_THRESHOLD consecutive cycles before being marked absent.
+ABSENT_THRESHOLD = int(os.getenv("ABSENT_THRESHOLD", "2"))
+consecutive_misses: dict[str, int] = {}
+
 # Track the last time we recorded any positive signal per device (for logging)
 last_presence_signal: dict[str, float] = {}
 
@@ -146,6 +151,10 @@ def _prune_device_state(known_macs: set[str]) -> None:
     for mac in list(last_presence_signal.keys()):
         if mac not in known_macs:
             last_presence_signal.pop(mac, None)
+
+    for mac in list(consecutive_misses.keys()):
+        if mac not in known_macs:
+            consecutive_misses.pop(mac, None)
 
 
 def _init_fast_path_queue() -> None:
@@ -702,13 +711,14 @@ def check_and_update_devices() -> None:
 
     Flow:
     1. Snapshot connected devices (instant).
-    2. Record connected devices as present, then disconnect to free ACL slots.
+    2. Record connected devices as present (update Convex immediately),
+       then disconnect to free ACL slots.
     3. Fetch Convex device list (cached for the cycle).
-    4. Probe ALL registered/pending devices not already connected via
-       l2ping → connect-probe fallback (sequential).
-    5. Determine presence: connected OR probe succeeded → present, else absent.
-    6. Push status updates to Convex.
-    7. Housekeeping (cleanup expired, stale pairings, failed pairings).
+    4. Probe remaining devices sequentially via l2ping → connect-probe
+       fallback.  Each result pushes a Convex update immediately:
+       - Present on first success (reset miss counter).
+       - Absent only after ABSENT_THRESHOLD consecutive misses.
+    5. Housekeeping (cleanup expired, stale pairings, failed pairings).
     """
 
     global failed_registrations, _cycle_device_cache
@@ -759,91 +769,132 @@ def check_and_update_devices() -> None:
     _retry_unpublished_devices(now, device_map, registered_macs, pending_macs)
     overrides = _get_device_overrides(now)
 
-    # -- 4. Probe ALL registered + pending devices (skip already-connected) --
-    all_trackable = registered_macs | pending_macs
-    l2ping_targets = sorted(all_trackable - connected_set)
+    # -- 4. Immediately update connected devices as present ------------------
+    updated_count = 0
+    newly_registered_count = 0
 
-    l2ping_results: dict[str, bool] = {}
-    if l2ping_targets:
-        logger.info("Probing %d device(s) via l2ping + connect-probe...", len(l2ping_targets))
-        l2ping_results = bluetooth_scanner.l2ping_batch(l2ping_targets)
+    for mac in connected_set:
+        # Register unknown connected devices first
+        if mac not in device_map:
+            if mac in failed_registrations:
+                logger.info("Retrying pending registration for %s", mac)
+            device_name = bluetooth_scanner.get_device_name(mac)
+            logger.info(
+                "New device detected via setup flow: %s (%s)",
+                mac,
+                device_name or "unknown",
+            )
+            result = register_new_device(mac, device_name)
+            if result:
+                newly_registered_count += 1
+                failed_registrations.discard(mac)
+                device_map[mac] = result
+                if result.get("pendingRegistration"):
+                    pending_macs.add(mac)
+                else:
+                    registered_macs.add(mac)
+            else:
+                failed_registrations.add(mac)
+                _record_unpublished_device(mac, device_name, now)
+                continue
+        else:
+            failed_registrations.discard(mac)
+
+        device = device_map.get(mac)
+        if not device or device.get("pendingRegistration"):
+            continue
+
+        # Connected → immediately present, reset miss counter
+        consecutive_misses.pop(mac, None)
+        current_status = device.get("status", "unknown")
+        desired_present, reason = _compute_presence_decision(mac, True, overrides)
+        if update_device_status(mac, desired_present, current_status, device):
+            if current_status != ("present" if desired_present else "absent"):
+                updated_count += 1
+
+    # -- 5. Probe remaining devices via l2ping + connect-probe (sequential) -
+    #    Update Convex immediately after each device is probed.
+    all_trackable = registered_macs | pending_macs
+    probe_targets = sorted(all_trackable - connected_set)
+
+    if probe_targets:
+        logger.info("Probing %d device(s) via l2ping + connect-probe...", len(probe_targets))
     else:
         logger.info("No devices to probe this cycle")
 
-    # Record signal timestamps for devices that responded
-    for mac, ok in l2ping_results.items():
-        if ok:
+    probe_start = time.perf_counter()
+    probe_successes = 0
+    l2ping_failures: list[str] = []
+
+    # Phase 1: l2ping each device, push present immediately on success
+    for mac in probe_targets:
+        success = bluetooth_scanner.l2ping_device(mac)
+        if success:
+            probe_successes += 1
+            bluetooth_scanner.disconnect_device(mac)
             last_presence_signal[mac] = now
+            consecutive_misses.pop(mac, None)
 
-    logger.info(
-        "Probe results: %d/%d device(s) responded",
-        sum(1 for ok in l2ping_results.values() if ok),
-        len(l2ping_targets),
-    )
-
-    # -- 5. Build the set of devices detected this cycle --------------------
-    #    detected = was connected at snapshot OR responded to probe
-    detected_this_cycle: set[str] = set(connected_set)
-    for mac, ok in l2ping_results.items():
-        if ok:
-            detected_this_cycle.add(mac)
-
-    # -- 6. Compute presence decisions and push updates ----------------------
-    desired_presence: dict[str, bool] = {}
-    for mac in registered_macs:
-        desired_present, reason = _compute_presence_decision(
-            mac, mac in detected_this_cycle, overrides,
-        )
-        desired_presence[mac] = desired_present
-        logger.debug("Device %s -> %s (%s)", mac, "present" if desired_present else "absent", reason)
-
-    present_set = {mac for mac, is_present in desired_presence.items() if is_present}
-    logger.info(
-        "%d/%d registered device(s) marked present",
-        len(present_set),
-        len(registered_macs),
-    )
-
-    # Register newly-connected devices that aren't in Convex yet
-    newly_registered_count = 0
-    for mac in connected_set:
-        if mac in device_map:
-            failed_registrations.discard(mac)
-            continue
-
-        if mac in failed_registrations:
-            logger.info("Retrying pending registration for %s", mac)
-
-        device_name = bluetooth_scanner.get_device_name(mac)
-        logger.info(
-            "New device detected via setup flow: %s (%s)",
-            mac,
-            device_name or "unknown",
-        )
-        result = register_new_device(mac, device_name)
-        if result:
-            newly_registered_count += 1
-            failed_registrations.discard(mac)
-            device_map[mac] = result
-            if result.get("pendingRegistration"):
-                pending_macs.add(mac)
-            else:
-                registered_macs.add(mac)
+            device = device_map.get(mac)
+            if device and not device.get("pendingRegistration"):
+                current_status = device.get("status", "unknown")
+                desired_present, reason = _compute_presence_decision(mac, True, overrides)
+                if update_device_status(mac, desired_present, current_status, device):
+                    if current_status != ("present" if desired_present else "absent"):
+                        updated_count += 1
         else:
-            failed_registrations.add(mac)
-            _record_unpublished_device(mac, device_name, now)
+            l2ping_failures.append(mac)
 
-    # Push status updates to Convex
-    updated_count = 0
-    for mac, device in device_map.items():
-        if device.get("pendingRegistration"):
-            continue
+    # Phase 2: connect-probe l2ping failures, push updates immediately
+    probe_hits = 0
+    for mac in l2ping_failures:
+        success = bluetooth_scanner.connect_probe(mac)
+        if success:
+            probe_successes += 1
+            probe_hits += 1
+            last_presence_signal[mac] = now
+            consecutive_misses.pop(mac, None)
 
-        current_status = device.get("status", "unknown")
-        is_present_now = mac in present_set
-        if update_device_status(mac, is_present_now, current_status, device):
-            if current_status != ("present" if is_present_now else "absent"):
-                updated_count += 1
+            device = device_map.get(mac)
+            if device and not device.get("pendingRegistration"):
+                current_status = device.get("status", "unknown")
+                desired_present, reason = _compute_presence_decision(mac, True, overrides)
+                if update_device_status(mac, desired_present, current_status, device):
+                    if current_status != ("present" if desired_present else "absent"):
+                        updated_count += 1
+        else:
+            # Device not detected — increment miss counter
+            misses = consecutive_misses.get(mac, 0) + 1
+            consecutive_misses[mac] = misses
+
+            device = device_map.get(mac)
+            if device and not device.get("pendingRegistration"):
+                if misses >= ABSENT_THRESHOLD:
+                    current_status = device.get("status", "unknown")
+                    desired_present, reason = _compute_presence_decision(mac, False, overrides)
+                    if update_device_status(mac, desired_present, current_status, device):
+                        if current_status != ("present" if desired_present else "absent"):
+                            updated_count += 1
+                    logger.info(
+                        "Device %s missed %d consecutive cycle(s) — marked absent",
+                        mac, misses,
+                    )
+                else:
+                    logger.info(
+                        "Device %s missed %d/%d cycle(s) — keeping current status",
+                        mac, misses, ABSENT_THRESHOLD,
+                    )
+        bluetooth_scanner.disconnect_device(mac)
+
+    probe_duration = time.perf_counter() - probe_start
+    if probe_targets:
+        probe_msg = ""
+        if l2ping_failures:
+            probe_msg = " (connect-probe: %d/%d)" % (probe_hits, len(l2ping_failures))
+        logger.info(
+            "Probing complete: %d/%d responded in %.2fs%s",
+            probe_successes, len(probe_targets), probe_duration, probe_msg,
+        )
 
     _prune_device_state(set(device_map.keys()))
 
