@@ -1,7 +1,6 @@
 import subprocess
 import logging
 from typing import Optional
-from concurrent.futures import ThreadPoolExecutor, as_completed
 import time
 from threading import Lock
 import os
@@ -20,18 +19,6 @@ L2PING_COUNT = int(os.getenv("L2PING_COUNT", "1"))
 
 # How long to wait for bluetoothctl connect attempts (seconds)
 CONNECT_TIMEOUT_SECONDS = int(os.getenv("CONNECT_TIMEOUT_SECONDS", "10"))
-
-# Connect-probe fallback: quick connect attempt for devices that ignore l2ping
-# Many devices (especially some Android phones) don't respond to L2CAP echo
-# but briefly show Connected: yes on a connect attempt, confirming presence.
-CONNECT_PROBE_FALLBACK = os.getenv("CONNECT_PROBE_FALLBACK", "true").lower() in ("1", "true", "yes", "on")
-CONNECT_PROBE_TIMEOUT_SECONDS = int(os.getenv("CONNECT_PROBE_TIMEOUT_SECONDS", "3"))
-CONNECT_PROBE_MAX_PER_BATCH = int(os.getenv("CONNECT_PROBE_MAX_PER_BATCH", "2"))
-
-# After this many consecutive l2ping failures a device is flagged as
-# "l2ping-resistant" and future probes skip l2ping, going straight to
-# connect_probe.  A single l2ping success resets the counter.
-L2PING_RESIST_THRESHOLD = int(os.getenv("L2PING_RESIST_THRESHOLD", "3"))
 
 # Cache TTL for bluetoothctl info calls (seconds)
 DEVICE_INFO_CACHE_SECONDS = int(os.getenv("DEVICE_INFO_CACHE_SECONDS", "5"))
@@ -83,30 +70,6 @@ class DeviceInfoCache:
 
 
 _device_info_cache = DeviceInfoCache(DEVICE_INFO_CACHE_SECONDS)
-
-# Serialises bluetoothctl disconnect calls so parallel l2ping threads
-# don't issue overlapping commands to the BlueZ daemon.
-_disconnect_lock = Lock()
-
-# Tracks consecutive l2ping failures per MAC.  Once a device exceeds
-# L2PING_RESIST_THRESHOLD it is probed via connect_probe instead.
-_l2ping_fail_count: dict[str, int] = {}
-_l2ping_fail_lock = Lock()
-
-
-def _record_l2ping_result(mac: str, success: bool) -> None:
-    """Update the consecutive-failure counter for *mac*."""
-    with _l2ping_fail_lock:
-        if success:
-            _l2ping_fail_count.pop(mac, None)
-        else:
-            _l2ping_fail_count[mac] = _l2ping_fail_count.get(mac, 0) + 1
-
-
-def is_l2ping_resistant(mac: str) -> bool:
-    """Return True if *mac* has failed l2ping enough times to skip it."""
-    with _l2ping_fail_lock:
-        return _l2ping_fail_count.get(mac, 0) >= L2PING_RESIST_THRESHOLD
 
 logger.info(
     "Bluetooth scanner config -> connect_timeout=%ss, l2ping_timeout=%ss, "
@@ -174,46 +137,6 @@ def l2ping_device(mac_address: str, count: int = None, timeout: int = None) -> b
         return False
 
 
-def connect_probe(mac_address: str) -> bool:
-    """Quick connect attempt to detect presence for devices that ignore l2ping.
-
-    Some devices (especially certain Android phones) don't respond to L2CAP
-    echo requests but will briefly show ``Connected: yes`` during a
-    ``bluetoothctl connect`` attempt — even if the connection ultimately
-    fails.  We look for that brief ``Connected: yes`` in the output to
-    confirm the device is in range.
-
-    Args:
-        mac_address: MAC address to probe.
-
-    Returns:
-        True if the device showed any sign of being reachable.
-    """
-    if not _is_valid_mac(mac_address):
-        return False
-
-    try:
-        result = subprocess.run(
-            ["bluetoothctl", "connect", mac_address],
-            capture_output=True,
-            text=True,
-            timeout=CONNECT_PROBE_TIMEOUT_SECONDS,
-        )
-        output = result.stdout
-        # "Connected: yes" appears even on connections that are later canceled
-        if "Connected: yes" in output or "Connection successful" in output:
-            logger.debug("connect_probe success for %s (saw Connected: yes)", mac_address)
-            return True
-        logger.debug("connect_probe failed for %s: %s", mac_address, output.strip()[:120])
-        return False
-    except subprocess.TimeoutExpired:
-        logger.debug("connect_probe timeout for %s", mac_address)
-        return False
-    except Exception as exc:
-        logger.debug("connect_probe error for %s: %s", mac_address, exc)
-        return False
-
-
 def run_l2ping_cycle(mac_addresses: list[str]) -> dict[str, bool]:
     """Sequentially l2ping each MAC address and report presence."""
     results: dict[str, bool] = {}
@@ -265,141 +188,22 @@ def l2ping_batch(
 
     results: dict[str, bool] = {}
     successes = 0
-    probe_candidates: list[str] = []  # devices that need connect-probe
-
-    # Phase 1: l2ping (skip l2ping-resistant devices)
     for mac in mac_addresses:
-        if is_l2ping_resistant(mac):
-            # Skip l2ping entirely — go straight to connect-probe later
-            probe_candidates.append(mac)
-            continue
         success = l2ping_device(mac)
-        _record_l2ping_result(mac, success)
         results[mac] = success
         if success:
             successes += 1
             if disconnect_after:
                 disconnect_device(mac)
-        else:
-            probe_candidates.append(mac)
-
-    # Phase 2: connect-probe for failures + l2ping-resistant devices
-    fallback_hits = 0
-    fallback_tried = 0
-    if CONNECT_PROBE_FALLBACK and probe_candidates:
-        for mac in probe_candidates:
-            if fallback_tried >= CONNECT_PROBE_MAX_PER_BATCH:
-                # Cap reached — mark remaining as not-seen
-                results.setdefault(mac, False)
-                continue
-            fallback_tried += 1
-            success = connect_probe(mac)
-            _record_l2ping_result(mac, success)  # reset counter on success
-            results[mac] = success
-            if success:
-                fallback_hits += 1
-                successes += 1
-                if disconnect_after:
-                    disconnect_device(mac)
-    else:
-        # No fallback — mark probe_candidates as failed
-        for mac in probe_candidates:
-            results.setdefault(mac, False)
 
     duration = time.perf_counter() - start
-    fallback_msg = ""
-    if fallback_tried:
-        fallback_msg = " (connect-probe: %d/%d)" % (fallback_hits, fallback_tried)
     logger.info(
-        "l2ping_batch complete: %d/%d responded in %.2fs%s",
+        "l2ping_batch complete: %d/%d responded in %.2fs",
         successes,
         len(results),
         duration,
-        fallback_msg,
     )
     return results
-
-
-def l2ping_parallel(
-    tier_lists: list[list[str]],
-    disconnect_after: bool = True,
-    max_workers: int = 3,
-) -> dict[str, bool]:
-    """Run l2ping_batch on multiple disjoint MAC lists in parallel threads.
-
-    Each list is processed sequentially within its own thread, but the
-    threads run concurrently.  This keeps total simultaneous ACL
-    connections equal to ``max_workers`` (default 3), well within the
-    RPi5 adapter limit of ~7.
-
-    Args:
-        tier_lists: Up to *max_workers* disjoint lists of MAC addresses.
-            Empty lists are silently skipped.
-        disconnect_after: Passed through to ``l2ping_batch``.
-        max_workers: Number of parallel threads.  Clamped to [1, 5] to
-            stay within the Bluetooth ACL connection limit.
-
-    Returns:
-        Merged dict mapping every probed MAC to its result.
-    """
-    # Clamp workers to safe range (leave 2 ACL slots for fast-path events)
-    max_workers = max(1, min(max_workers, 5))
-
-    # Filter out empty lists
-    non_empty = [lst for lst in tier_lists if lst]
-    if not non_empty:
-        return {}
-
-    # If only 1 list or 1 worker, fall back to sequential
-    if max_workers == 1 or len(non_empty) == 1:
-        merged: dict[str, bool] = {}
-        for lst in non_empty:
-            merged.update(l2ping_batch(lst, disconnect_after=disconnect_after))
-        return merged
-
-    start = time.perf_counter()
-    total_macs = sum(len(lst) for lst in non_empty)
-    logger.info(
-        "l2ping_parallel: %d tier(s), %d device(s), %d thread(s)",
-        len(non_empty),
-        total_macs,
-        min(max_workers, len(non_empty)),
-    )
-
-    merged = {}
-    with ThreadPoolExecutor(
-        max_workers=min(max_workers, len(non_empty)),
-        thread_name_prefix="l2ping",
-    ) as pool:
-        futures = {
-            pool.submit(l2ping_batch, lst, disconnect_after=disconnect_after): idx
-            for idx, lst in enumerate(non_empty)
-        }
-        for future in as_completed(futures):
-            tier_idx = futures[future]
-            try:
-                result = future.result()
-                merged.update(result)
-            except Exception as exc:
-                logger.error(
-                    "l2ping_parallel: tier %d raised %s — treating as all-absent",
-                    tier_idx,
-                    exc,
-                )
-                # Mark all MACs in this tier as absent
-                for mac in non_empty[tier_idx]:
-                    merged.setdefault(mac, False)
-
-    duration = time.perf_counter() - start
-    successes = sum(1 for v in merged.values() if v)
-    logger.info(
-        "l2ping_parallel complete: %d/%d responded in %.2fs (%d thread(s))",
-        successes,
-        len(merged),
-        duration,
-        min(max_workers, len(non_empty)),
-    )
-    return merged
 
 
 def _bluetoothctl_info(mac_address: str) -> Optional[str]:

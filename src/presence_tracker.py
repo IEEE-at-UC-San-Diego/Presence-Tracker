@@ -90,9 +90,6 @@ WARM_TIER_BATCH = int(os.getenv("WARM_TIER_BATCH", "5"))
 COLD_TIER_BATCH = int(os.getenv("COLD_TIER_BATCH", "3"))
 WARM_TIER_THRESHOLD_SECONDS = int(os.getenv("WARM_TIER_THRESHOLD_SECONDS", "600"))
 
-# Number of parallel threads for l2ping (1 = sequential, max 5)
-L2PING_THREADS = int(os.getenv("L2PING_THREADS", "3"))
-
 # Track devices that failed to register, so we retry them
 failed_registrations: set[str] = set()
 
@@ -202,12 +199,8 @@ class DeviceScheduler:
         pending_macs: set[str],
         connected_set: set[str],
         now: float,
-    ) -> tuple[list[str], list[str], list[str]]:
-        """Return three disjoint MAC lists (active, warm, cold) to l2ping.
-
-        Each list is intended to run in its own thread via
-        ``bluetooth_scanner.l2ping_parallel()``.
-        """
+    ) -> list[str]:
+        """Return the ordered list of MACs to l2ping this cycle (sequential)."""
 
         # Never l2ping devices that are already connected — they are present.
         candidates = (registered_macs | pending_macs) - connected_set
@@ -230,36 +223,33 @@ class DeviceScheduler:
                 cold.append(mac)
 
         # Cap active tier
-        active_selected = active[:ACTIVE_TIER_MAX]
+        selected = active[:ACTIVE_TIER_MAX]
 
         # Rotate through warm tier
-        warm_selected: list[str] = []
         if warm:
             batch = WARM_TIER_BATCH
             start = self._warm_offset % len(warm)
-            warm_selected = (warm + warm)[start : start + batch]
+            selected += (warm + warm)[start : start + batch]
             self._warm_offset = (start + batch) % max(1, len(warm))
 
         # Rotate through cold tier
-        cold_selected: list[str] = []
         if cold:
             batch = COLD_TIER_BATCH
             start = self._cold_offset % len(cold)
-            cold_selected = (cold + cold)[start : start + batch]
+            selected += (cold + cold)[start : start + batch]
             self._cold_offset = (start + batch) % max(1, len(cold))
 
-        total = len(active_selected) + len(warm_selected) + len(cold_selected)
         logger.info(
             "DeviceScheduler: active=%d warm=%d/%d cold=%d/%d connected=%d (skipped) → probing %d",
-            len(active_selected),
-            len(warm_selected),
+            len(active),
+            min(WARM_TIER_BATCH, len(warm)),
             len(warm),
-            len(cold_selected),
+            min(COLD_TIER_BATCH, len(cold)),
             len(cold),
             len(connected_set & (registered_macs | pending_macs)),
-            total,
+            len(selected),
         )
-        return active_selected, warm_selected, cold_selected
+        return selected
 
 
 _device_scheduler = DeviceScheduler()
@@ -1030,24 +1020,21 @@ def check_and_update_devices() -> None:
     overrides = _get_device_overrides(now)
 
     # -- 4. Tiered l2ping scheduling ----------------------------------------
-    active_tier, warm_tier, cold_tier = _device_scheduler.select(
+    l2ping_targets = _device_scheduler.select(
         registered_macs, pending_macs, connected_set, now,
     )
-    all_l2ping_targets = active_tier + warm_tier + cold_tier
 
-    # -- 5. Run l2ping in parallel (1 thread per tier) ----------------------
+    # -- 5. Run l2ping sequentially (no threading — avoids HCI contention) --
     l2ping_results: dict[str, bool] = {}
-    if all_l2ping_targets:
-        l2ping_results = bluetooth_scanner.l2ping_parallel(
-            [active_tier, warm_tier, cold_tier],
-            disconnect_after=True,
-            max_workers=L2PING_THREADS,
+    if l2ping_targets:
+        l2ping_results = bluetooth_scanner.l2ping_batch(
+            l2ping_targets, disconnect_after=True,
         )
     else:
         logger.info("No devices selected for l2ping this cycle")
 
-    # Update signal stats for probed devices (main thread only — no races)
-    for mac in all_l2ping_targets:
+    # Update signal stats for probed devices
+    for mac in l2ping_targets:
         success = l2ping_results.get(mac, False)
         _update_signal_stats(mac, success, "l2ping" if success else None, now)
 
@@ -1187,8 +1174,8 @@ def run_presence_tracker() -> None:
     logger.info("Grace period for new devices: %ds", GRACE_PERIOD_SECONDS)
     logger.info("Presence TTL: %ds", PRESENT_TTL_SECONDS)
     logger.info(
-        "Tiered scheduler: active_max=%d warm_batch=%d cold_batch=%d warm_threshold=%ds l2ping_threads=%d",
-        ACTIVE_TIER_MAX, WARM_TIER_BATCH, COLD_TIER_BATCH, WARM_TIER_THRESHOLD_SECONDS, L2PING_THREADS,
+        "Tiered scheduler: active_max=%d warm_batch=%d cold_batch=%d warm_threshold=%ds (sequential l2ping)",
+        ACTIVE_TIER_MAX, WARM_TIER_BATCH, COLD_TIER_BATCH, WARM_TIER_THRESHOLD_SECONDS,
     )
     logger.info("Convex query timeout: %ds", CONVEX_QUERY_TIMEOUT)
 
