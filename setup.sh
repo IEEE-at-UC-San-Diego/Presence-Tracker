@@ -432,6 +432,23 @@ SCRIPT
   sudo chmod +x "$BLUETOOTH_DISCOVERABLE_SCRIPT"
 }
 
+cleanup_legacy_services() {
+  log_step "Cleaning up legacy Python-era services"
+
+  local legacy_units=(
+    "bluetooth-agent.service"
+    "presence-tracker-python.service"
+    "presence-tracker-agent.service"
+  )
+
+  local unit
+  for unit in "${legacy_units[@]}"; do
+    sudo systemctl disable --now "$unit" 2>/dev/null || true
+    sudo rm -f "/etc/systemd/system/$unit" 2>/dev/null || true
+    sudo rm -f "/lib/systemd/system/$unit" 2>/dev/null || true
+  done
+}
+
 generate_services() {
   log_step "Generating systemd units"
 
@@ -519,9 +536,10 @@ restart_services() {
     (cd "$RUST_AGENT_DIR" && cargo build --release)
   fi
 
-  sudo rm -f /etc/systemd/system/bluetooth-agent.service 2>/dev/null || true
+  cleanup_legacy_services
+  install_discoverable_script
+  generate_services
   sudo systemctl daemon-reload
-  sudo systemctl disable --now bluetooth-agent.service 2>/dev/null || true
   sudo systemctl enable presence-tracker.service
   sudo systemctl enable bluetooth-discoverable.service
   sudo systemctl restart presence-tracker.service
@@ -561,6 +579,7 @@ full_install() {
   configure_l2ping_permissions
   write_agent_config
   install_discoverable_script
+  cleanup_legacy_services
   generate_services
   deploy_backend
   restart_services
