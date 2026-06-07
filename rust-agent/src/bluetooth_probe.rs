@@ -48,6 +48,32 @@ pub fn is_valid_mac(mac: &str) -> bool {
             .all(|part| part.len() == 2 && part.chars().all(|c| c.is_ascii_hexdigit()))
 }
 
+pub fn get_paired_devices(runner: &dyn CommandRunner, timeout_seconds: u64) -> Vec<String> {
+    let output = runner
+        .run(
+            "bluetoothctl",
+            &["devices", "Paired"],
+            Duration::from_secs(timeout_seconds.max(1)),
+        )
+        .ok();
+
+    match output {
+        Some(out) if out.code == 0 => out
+            .stdout
+            .lines()
+            .filter_map(|line| {
+                let fields: Vec<&str> = line.split_whitespace().collect();
+                if fields.len() >= 2 && fields[0] == "Device" && is_valid_mac(fields[1]) {
+                    Some(normalize_mac(fields[1]))
+                } else {
+                    None
+                }
+            })
+            .collect(),
+        _ => Vec::new(),
+    }
+}
+
 pub fn get_connected_devices(runner: &dyn CommandRunner, timeout_seconds: u64) -> Vec<String> {
     let output = runner
         .run(

@@ -8,18 +8,24 @@ use bluer::{AdapterEvent, Address, DeviceEvent, DeviceProperty};
 use std::collections::HashSet;
 use std::future::Future;
 use std::pin::Pin;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 use std::time::Duration;
 use tokio_stream::StreamExt;
 
 type UnitFuture = Pin<Box<dyn Future<Output = Result<(), ReqError>> + Send>>;
+pub type PairingGuard = Arc<Mutex<HashSet<String>>>;
 
 pub struct AgentRuntime {
     _session: bluer::Session,
     _handle: AgentHandle,
 }
 
-pub async fn start_agent(config: &Config, runner: Arc<dyn CommandRunner>, convex: Arc<ConvexClient>) -> Result<AgentRuntime> {
+pub async fn start_agent(
+    config: &Config,
+    runner: Arc<dyn CommandRunner>,
+    convex: Arc<ConvexClient>,
+    pairing_guard: PairingGuard,
+) -> Result<AgentRuntime> {
     configure_adapter(runner.as_ref());
     let session = bluer::Session::new().await?;
     let adapter = session.default_adapter().await?;
@@ -60,24 +66,44 @@ pub async fn start_agent(config: &Config, runner: Arc<dyn CommandRunner>, convex
 
     let runner_for_confirmation = runner.clone();
     let convex_for_confirmation = convex.clone();
+    let pairing_guard_for_confirmation = pairing_guard.clone();
     let request_confirmation = Box::new(move |req: bluer::agent::RequestConfirmation| -> UnitFuture {
         let runner = runner_for_confirmation.clone();
         let convex = convex_for_confirmation.clone();
+        let pairing_guard = pairing_guard_for_confirmation.clone();
         Box::pin(async move {
             let mac = req.device.to_string().to_ascii_uppercase();
-            register_paired_device(runner.as_ref(), convex.as_ref(), &mac, command_timeout_seconds, "request_confirmation").await;
+            register_paired_device(
+                runner.as_ref(),
+                convex.as_ref(),
+                &mac,
+                command_timeout_seconds,
+                "request_confirmation",
+                pairing_guard.as_ref(),
+            )
+            .await;
             Ok(())
         })
     });
 
     let runner_for_authorization = runner.clone();
     let convex_for_authorization = convex.clone();
+    let pairing_guard_for_authorization = pairing_guard.clone();
     let request_authorization = Box::new(move |req: bluer::agent::RequestAuthorization| -> UnitFuture {
         let runner = runner_for_authorization.clone();
         let convex = convex_for_authorization.clone();
+        let pairing_guard = pairing_guard_for_authorization.clone();
         Box::pin(async move {
             let mac = req.device.to_string().to_ascii_uppercase();
-            register_paired_device(runner.as_ref(), convex.as_ref(), &mac, command_timeout_seconds, "request_authorization").await;
+            register_paired_device(
+                runner.as_ref(),
+                convex.as_ref(),
+                &mac,
+                command_timeout_seconds,
+                "request_authorization",
+                pairing_guard.as_ref(),
+            )
+            .await;
             Ok(())
         })
     });
@@ -102,9 +128,18 @@ pub async fn start_agent(config: &Config, runner: Arc<dyn CommandRunner>, convex
 
     let runner_for_events = runner.clone();
     let convex_for_events = convex.clone();
+    let pairing_guard_for_events = pairing_guard.clone();
     let adapter_name = adapter.name().to_string();
     tokio::spawn(async move {
-        if let Err(e) = monitor_device_events(adapter_name, runner_for_events, convex_for_events, command_timeout_seconds).await {
+        if let Err(e) = monitor_device_events(
+            adapter_name,
+            runner_for_events,
+            convex_for_events,
+            pairing_guard_for_events,
+            command_timeout_seconds,
+        )
+        .await
+        {
             logging::warn("bluetooth_agent", "monitor_events", None, Some("error"), &e.to_string());
         }
     });
@@ -127,6 +162,7 @@ async fn monitor_device_events(
     adapter_name: String,
     runner: Arc<dyn CommandRunner>,
     convex: Arc<ConvexClient>,
+    pairing_guard: PairingGuard,
     command_timeout_seconds: u64,
 ) -> Result<()> {
     let session = bluer::Session::new().await?;
@@ -146,8 +182,9 @@ async fn monitor_device_events(
             let adapter_name = adapter_name.clone();
             let runner = runner.clone();
             let convex = convex.clone();
+            let pairing_guard = pairing_guard.clone();
             tokio::spawn(async move {
-                watch_for_pairing(adapter_name, addr, runner, convex, command_timeout_seconds).await;
+                watch_for_pairing(adapter_name, addr, runner, convex, pairing_guard, command_timeout_seconds).await;
             });
         }
     }
@@ -160,6 +197,7 @@ async fn watch_for_pairing(
     addr: Address,
     runner: Arc<dyn CommandRunner>,
     convex: Arc<ConvexClient>,
+    pairing_guard: PairingGuard,
     command_timeout_seconds: u64,
 ) {
     let mac = addr.to_string().to_ascii_uppercase();
@@ -208,7 +246,15 @@ async fn watch_for_pairing(
             evt = device_events.next() => {
                 match evt {
                     Some(DeviceEvent::PropertyChanged(DeviceProperty::Paired(true))) => {
-                        register_paired_device(runner.as_ref(), convex.as_ref(), &mac, command_timeout_seconds, "paired_event").await;
+                        register_paired_device(
+                            runner.as_ref(),
+                            convex.as_ref(),
+                            &mac,
+                            command_timeout_seconds,
+                            "paired_event",
+                            pairing_guard.as_ref(),
+                        )
+                        .await;
                         return;
                     }
                     None => return,
@@ -226,12 +272,16 @@ async fn register_paired_device(
     mac: &str,
     command_timeout_seconds: u64,
     source: &str,
+    pairing_guard: &Mutex<HashSet<String>>,
 ) {
     if !is_valid_mac(mac) {
         return;
     }
 
     let mac = normalize_mac(mac);
+    if let Ok(mut guard) = pairing_guard.lock() {
+        guard.insert(mac.clone());
+    }
     let _ = trust_device(runner, &mac, command_timeout_seconds);
     logging::info(
         "bluetooth_agent",
@@ -257,6 +307,10 @@ async fn register_paired_device(
             Some("error"),
             &e.to_string(),
         ),
+    }
+
+    if let Ok(mut guard) = pairing_guard.lock() {
+        guard.remove(&mac);
     }
 }
 

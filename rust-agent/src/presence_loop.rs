@@ -1,6 +1,7 @@
+use crate::bluetooth_agent::PairingGuard;
 use crate::bluetooth_probe::{
-    disconnect_device, forget_device, get_connected_devices, get_device_name, is_device_paired,
-    normalize_mac, probe_device, CommandRunner,
+    disconnect_device, forget_device, get_connected_devices, get_device_name, get_paired_devices,
+    is_device_paired, normalize_mac, probe_device, CommandRunner,
 };
 use crate::config::Config;
 use crate::convex_client::{ConvexClient, DeviceRecord};
@@ -26,13 +27,25 @@ pub struct PresenceLoop {
     config: Config,
     convex: Arc<ConvexClient>,
     runner: Arc<dyn CommandRunner>,
+    pairing_guard: PairingGuard,
     state: AgentState,
 }
 
 impl PresenceLoop {
-    pub fn new(config: Config, convex: Arc<ConvexClient>, runner: Arc<dyn CommandRunner>) -> Self {
+    pub fn new(
+        config: Config,
+        convex: Arc<ConvexClient>,
+        runner: Arc<dyn CommandRunner>,
+        pairing_guard: PairingGuard,
+    ) -> Self {
         let state = load_state(&config.paths.state_file).unwrap_or_default();
-        Self { config, convex, runner, state }
+        Self {
+            config,
+            convex,
+            runner,
+            pairing_guard,
+            state,
+        }
     }
 
     pub async fn run_forever(&mut self) -> Result<()> {
@@ -58,6 +71,11 @@ impl PresenceLoop {
         let devices = self.convex.get_devices().await?;
         self.cleanup_expired_pending(&devices).await?;
         let devices = self.convex.get_devices().await?;
+        let known_macs: HashSet<String> = devices
+            .iter()
+            .map(|d| normalize_mac(&d.mac_address))
+            .collect();
+        self.cleanup_orphan_paired(&known_macs).await?;
         let connected: HashSet<String> = get_connected_devices(
             self.runner.as_ref(),
             self.config.bluetooth.command_timeout_seconds,
@@ -263,6 +281,39 @@ impl PresenceLoop {
                     );
                 }
             }
+        }
+
+        Ok(())
+    }
+
+    async fn cleanup_orphan_paired(&self, known_macs: &HashSet<String>) -> Result<()> {
+        let paired = get_paired_devices(
+            self.runner.as_ref(),
+            self.config.bluetooth.command_timeout_seconds,
+        );
+        let pairing = self
+            .pairing_guard
+            .lock()
+            .map(|guard| guard.clone())
+            .unwrap_or_default();
+
+        for mac in paired {
+            if known_macs.contains(&mac) || pairing.contains(&mac) {
+                continue;
+            }
+
+            let forgotten = forget_device(
+                self.runner.as_ref(),
+                &mac,
+                self.config.bluetooth.command_timeout_seconds,
+            );
+            logging::info(
+                "presence_loop",
+                "forget_orphan_paired",
+                Some(&mac),
+                if forgotten { Some("ok") } else { Some("error") },
+                "Paired device not tracked in Convex, removed from Bluetooth",
+            );
         }
 
         Ok(())

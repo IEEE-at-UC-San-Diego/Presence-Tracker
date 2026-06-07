@@ -1,6 +1,7 @@
 use anyhow::Result;
 use clap::Parser;
-use std::sync::Arc;
+use std::collections::HashSet;
+use std::sync::{Arc, Mutex};
 use presence_tracker_rs::api_server;
 use presence_tracker_rs::bluetooth_agent;
 use presence_tracker_rs::bluetooth_probe::{self, ProcessRunner};
@@ -30,7 +31,8 @@ async fn main() -> Result<()> {
         config.convex.admin_key.clone(),
     )?);
 
-    let _agent = bluetooth_agent::start_agent(&config, runner.clone(), convex.clone()).await?;
+    let pairing_guard = Arc::new(Mutex::new(HashSet::new()));
+    let _agent = bluetooth_agent::start_agent(&config, runner.clone(), convex.clone(), pairing_guard.clone()).await?;
 
     if config.api.enabled {
         let api_runner = runner.clone();
@@ -43,7 +45,7 @@ async fn main() -> Result<()> {
         });
     }
 
-    let mut loop_runtime = PresenceLoop::new(config, convex, runner);
+    let mut loop_runtime = PresenceLoop::new(config, convex, runner, pairing_guard);
     loop_runtime.run_forever().await?;
 
     Ok(())
