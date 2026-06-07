@@ -168,6 +168,7 @@ pub fn configure_adapter(runner: &dyn CommandRunner) {
         ("bluetoothctl", &["--timeout", "5", "pairable", "on"]),
         ("bluetoothctl", &["--timeout", "5", "discoverable-timeout", "0"]),
         ("bluetoothctl", &["--timeout", "5", "pairable-timeout", "0"]),
+        ("bluetoothctl", &["--timeout", "5", "advertise", "on"]),
         // Enable Secure Simple Pairing mode for "Just Works" auto-pairing
         ("hciconfig", &["hci0", "sspmode", "1"]),
     ];

@@ -430,8 +430,7 @@ timeout 5s bluetoothctl --timeout 3 discoverable-timeout 0 >/dev/null 2>&1 || tr
 if timeout 5s bluetoothctl help 2>/dev/null | grep -q "pairable-timeout"; then
   timeout 5s bluetoothctl --timeout 3 pairable-timeout 0 >/dev/null 2>&1 || true
 fi
-timeout 5s bluetoothctl --timeout 3 agent NoInputNoOutput >/dev/null 2>&1 || true
-timeout 5s bluetoothctl --timeout 3 default-agent >/dev/null 2>&1 || true
+timeout 5s bluetoothctl --timeout 3 advertise on >/dev/null 2>&1 || true
 SCRIPT
   sudo chmod +x "$BLUETOOTH_DISCOVERABLE_SCRIPT"
 }
