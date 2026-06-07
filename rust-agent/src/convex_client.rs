@@ -22,6 +22,8 @@ pub struct DeviceRecord {
     pub last_seen: Option<u64>,
     pub connected_since: Option<u64>,
     pub pending_registration: bool,
+    pub first_seen: Option<u64>,
+    pub grace_period_end: Option<u64>,
 }
 
 impl DeviceRecord {
@@ -75,6 +77,12 @@ impl ConvexClient {
             "status": status
         });
         let _ = self.call("mutation", "devices:updateDeviceStatus", args).await?;
+        Ok(())
+    }
+
+    pub async fn delete_device(&self, id: &str) -> Result<()> {
+        let args = json!({ "id": id });
+        let _ = self.call("mutation", "devices:deleteDevice", args).await?;
         Ok(())
     }
 
@@ -139,6 +147,8 @@ fn value_to_device(v: &Value) -> Option<DeviceRecord> {
         last_seen: obj.get("lastSeen").and_then(|v| v.as_u64()),
         connected_since: obj.get("connectedSince").and_then(|v| v.as_u64()),
         pending_registration: obj.get("pendingRegistration").and_then(|v| v.as_bool()).unwrap_or(false),
+        first_seen: obj.get("firstSeen").and_then(|v| v.as_u64()),
+        grace_period_end: obj.get("gracePeriodEnd").and_then(|v| v.as_u64()),
     })
 }
 

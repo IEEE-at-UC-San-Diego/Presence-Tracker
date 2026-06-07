@@ -99,6 +99,8 @@ export const getDevices = query({
         lastSeen: device.lastSeen,
         connectedSince: device.connectedSince,
         pendingRegistration: device.pendingRegistration,
+        firstSeen: device.firstSeen,
+        gracePeriodEnd: device.gracePeriodEnd,
       }),
     );
     return mappedDevices;

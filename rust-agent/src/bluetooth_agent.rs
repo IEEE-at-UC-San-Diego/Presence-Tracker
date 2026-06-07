@@ -188,8 +188,9 @@ async fn watch_for_pairing(
         }
     };
 
+    // Already-paired devices are handled by pair callbacks. Only register on a new
+    // Paired=true transition so restarts do not re-add expired pending devices.
     if device.is_paired().await.unwrap_or(false) {
-        register_paired_device(runner.as_ref(), convex.as_ref(), &mac, command_timeout_seconds, "device_added").await;
         return;
     }
 

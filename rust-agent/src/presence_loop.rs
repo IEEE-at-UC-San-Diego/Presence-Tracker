@@ -1,6 +1,6 @@
 use crate::bluetooth_probe::{
-    disconnect_device, get_connected_devices, get_device_name, is_device_paired, normalize_mac,
-    probe_device, CommandRunner,
+    disconnect_device, forget_device, get_connected_devices, get_device_name, is_device_paired,
+    normalize_mac, probe_device, CommandRunner,
 };
 use crate::config::Config;
 use crate::convex_client::{ConvexClient, DeviceRecord};
@@ -55,6 +55,8 @@ impl PresenceLoop {
 
     pub async fn run_cycle(&mut self) -> Result<()> {
         let now = now_epoch_seconds();
+        let devices = self.convex.get_devices().await?;
+        self.cleanup_expired_pending(&devices).await?;
         let devices = self.convex.get_devices().await?;
         let connected: HashSet<String> = get_connected_devices(
             self.runner.as_ref(),
@@ -211,6 +213,60 @@ impl PresenceLoop {
         self.state.pending_first_seen_epoch.retain(|mac, _| known.contains(mac));
         self.state.ignored_devices.retain(|mac| known.contains(mac));
     }
+
+    async fn cleanup_expired_pending(&self, devices: &[DeviceRecord]) -> Result<()> {
+        let now_ms = now_epoch_millis();
+        let grace_ms = self.config.presence.grace_period_seconds.saturating_mul(1000);
+
+        for device in devices {
+            if !device.pending_registration {
+                continue;
+            }
+
+            let grace_end = device.grace_period_end.unwrap_or_else(|| {
+                device.first_seen.unwrap_or(now_ms).saturating_add(grace_ms)
+            });
+            if grace_end > now_ms {
+                continue;
+            }
+
+            let mac = normalize_mac(&device.mac_address);
+            let forgotten = forget_device(
+                self.runner.as_ref(),
+                &mac,
+                self.config.bluetooth.command_timeout_seconds,
+            );
+            logging::info(
+                "presence_loop",
+                "forget_expired_pending",
+                Some(&mac),
+                if forgotten { Some("ok") } else { Some("error") },
+                "Expired pending device removed from Bluetooth",
+            );
+
+            if let Some(id) = &device.id {
+                if let Err(err) = self.convex.delete_device(id).await {
+                    logging::warn(
+                        "presence_loop",
+                        "delete_expired_pending",
+                        Some(&mac),
+                        Some("error"),
+                        &err.to_string(),
+                    );
+                } else {
+                    logging::info(
+                        "presence_loop",
+                        "delete_expired_pending",
+                        Some(&mac),
+                        Some("ok"),
+                        "Expired pending device removed from Convex",
+                    );
+                }
+            }
+        }
+
+        Ok(())
+    }
 }
 
 fn load_state(path: &Path) -> Result<AgentState> {
@@ -232,5 +288,12 @@ fn now_epoch_seconds() -> u64 {
     std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .map(|d| d.as_secs())
+        .unwrap_or(0)
+}
+
+fn now_epoch_millis() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_millis() as u64)
         .unwrap_or(0)
 }
