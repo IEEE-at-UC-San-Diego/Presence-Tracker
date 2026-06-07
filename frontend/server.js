@@ -19,6 +19,107 @@ function resolveConvexUrl() {
 const convexUrl = resolveConvexUrl();
 const deploymentMode = process.env.DEPLOYMENT_MODE || process.env.CONVEX_URL_MODE || "convex";
 const organizationName = process.env.ORGANIZATION_NAME || "Presence Tracker";
+const agentApiUrl = (process.env.AGENT_API_URL || "http://127.0.0.1:3133").replace(/\/$/, "");
+
+const MAC_ADDRESS_RE = /^([0-9A-Fa-f]{2}:){5}[0-9A-Fa-f]{2}$/;
+
+function isValidMac(mac) {
+  return typeof mac === "string" && MAC_ADDRESS_RE.test(mac.trim());
+}
+
+function readRequestBody(req) {
+  return new Promise((resolve, reject) => {
+    const chunks = [];
+    req.on("data", (chunk) => chunks.push(chunk));
+    req.on("end", () => resolve(Buffer.concat(chunks).toString("utf8")));
+    req.on("error", reject);
+  });
+}
+
+function sendJson(res, statusCode, payload) {
+  const body = JSON.stringify(payload);
+  res.writeHead(statusCode, {
+    "Content-Type": "application/json; charset=utf-8",
+    "Cache-Control": "no-store",
+  });
+  res.end(body);
+}
+
+async function forgetBluetoothDevice(macAddress) {
+  const mac = macAddress.trim().toUpperCase();
+  const commands = [
+    ["bluetoothctl", ["disconnect", mac]],
+    ["bluetoothctl", ["untrust", mac]],
+    ["bluetoothctl", ["remove", mac]],
+  ];
+
+  for (const [program, args] of commands) {
+    const proc = Bun.spawn([program, ...args], {
+      stdout: "pipe",
+      stderr: "pipe",
+    });
+    const exitCode = await proc.exited;
+    if (program === "bluetoothctl" && args[0] === "remove" && exitCode !== 0) {
+      return false;
+    }
+  }
+
+  return true;
+}
+
+async function handleForgetDevice(req, res) {
+  let payload;
+  try {
+    payload = JSON.parse(await readRequestBody(req));
+  } catch {
+    sendJson(res, 400, { error: "Invalid JSON body" });
+    return;
+  }
+
+  const macAddress = payload?.macAddress;
+  if (!isValidMac(macAddress)) {
+    sendJson(res, 400, { error: "Invalid macAddress" });
+    return;
+  }
+
+  try {
+    const response = await fetch(`${agentApiUrl}/api/forget-device`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ macAddress: macAddress.trim().toUpperCase() }),
+    });
+
+    const text = await response.text();
+    let body;
+    try {
+      body = text ? JSON.parse(text) : {};
+    } catch {
+      body = { error: text || response.statusText };
+    }
+
+    if (!response.ok) {
+      sendJson(res, response.status, body.error ? body : { error: text || response.statusText });
+      return;
+    }
+
+    sendJson(res, 200, body.success === undefined ? { success: true } : body);
+  } catch (error) {
+    if (process.env.BLUETOOTH_FORGET_LOCAL === "1") {
+      const ok = await forgetBluetoothDevice(macAddress);
+      if (!ok) {
+        sendJson(res, 500, { error: "Bluetooth remove failed" });
+        return;
+      }
+      sendJson(res, 200, { success: true });
+      return;
+    }
+
+    console.error("[frontend] forget-device proxy failed", error);
+    sendJson(res, 502, {
+      error: `Agent API unavailable at ${agentApiUrl}. Set AGENT_API_URL or BLUETOOTH_FORGET_LOCAL=1.`,
+    });
+  }
+}
 
 const configScript = [
   `window.CONVEX_URL = ${JSON.stringify(convexUrl)};`,
@@ -89,6 +190,11 @@ const server = http.createServer(async (req, res) => {
         "Cache-Control": "no-store",
       });
       res.end(configScript);
+      return;
+    }
+
+    if (method === "POST" && pathname === "/api/forget-device") {
+      await handleForgetDevice(req, res);
       return;
     }
 

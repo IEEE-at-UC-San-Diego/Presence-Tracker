@@ -116,6 +116,21 @@ pub fn is_device_paired(runner: &dyn CommandRunner, mac: &str, timeout_seconds: 
         .any(|line| line.trim().eq_ignore_ascii_case("Paired: yes"))
 }
 
+pub fn forget_device(runner: &dyn CommandRunner, mac: &str, timeout_seconds: u64) -> bool {
+    if !is_valid_mac(mac) {
+        return false;
+    }
+    let mac = normalize_mac(mac);
+    let timeout = Duration::from_secs(timeout_seconds.max(1));
+
+    let _ = disconnect_device(runner, &mac, timeout_seconds);
+    let _ = runner.run("bluetoothctl", &["untrust", mac.as_str()], timeout);
+    match runner.run("bluetoothctl", &["remove", mac.as_str()], timeout) {
+        Ok(out) => out.code == 0 || out.stdout.to_ascii_lowercase().contains("device has been removed"),
+        Err(_) => false,
+    }
+}
+
 pub fn disconnect_device(runner: &dyn CommandRunner, mac: &str, timeout_seconds: u64) -> bool {
     if !is_valid_mac(mac) {
         return false;

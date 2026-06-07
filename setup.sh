@@ -411,6 +411,10 @@ max_lines = 1000
 
 [paths]
 state_file = "config/agent_state.json"
+
+[api]
+enabled = true
+port = 3133
 CFG
 }
 

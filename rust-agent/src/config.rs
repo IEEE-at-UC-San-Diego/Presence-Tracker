@@ -23,6 +23,8 @@ pub struct Config {
     pub logging: LoggingConfig,
     #[serde(default)]
     pub paths: PathsConfig,
+    #[serde(default)]
+    pub api: ApiConfig,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -117,6 +119,24 @@ impl Default for PathsConfig {
         }
     }
 }
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ApiConfig {
+    #[serde(default = "api_enabled_default")]
+    pub enabled: bool,
+    #[serde(default = "api_port_default")]
+    pub port: u16,
+}
+
+impl Default for ApiConfig {
+    fn default() -> Self {
+        Self {
+            enabled: api_enabled_default(),
+            port: api_port_default(),
+        }
+    }
+}
+
 impl Config {
     pub fn load(path: &Path) -> Result<Self> {
         dotenvy::dotenv().ok();
@@ -173,6 +193,8 @@ fn l2ping_timeout_default() -> u64 { 2 }
 fn l2ping_count_default() -> u32 { 1 }
 fn connect_probe_timeout_default() -> u64 { 3 }
 fn command_timeout_default() -> u64 { 10 }
+fn api_enabled_default() -> bool { true }
+fn api_port_default() -> u16 { 3133 }
 fn max_lines_default() -> usize { 1000 }
 fn log_file_default() -> PathBuf { PathBuf::from("logs/presence_tracker.log") }
 fn state_file_default() -> PathBuf { PathBuf::from("config/agent_state.json") }

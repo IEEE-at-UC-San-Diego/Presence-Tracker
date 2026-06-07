@@ -11,7 +11,10 @@ services:
       - CONVEX_SELF_HOSTED_URL=${CONVEX_SELF_HOSTED_URL}
       - DEPLOYMENT_MODE=${DEPLOYMENT_MODE:-convex}
       - ORGANIZATION_NAME=${ORGANIZATION_NAME:-Presence Tracker}
+      - AGENT_API_URL=${AGENT_API_URL:-http://host.docker.internal:3133}
       - PORT=3132
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
     restart: always
 
 # Note: presence-tracker.service runs on the host (Raspberry Pi) to access Bluetooth hardware.
