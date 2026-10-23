@@ -1,5 +1,5 @@
 # syntax=docker/dockerfile:1
-FROM oven/bun:1.1.17 AS runner
+FROM oven/bun:1.4.4 AS runner
 
 WORKDIR /app
 
